@@ -32,7 +32,7 @@ go version
 Clone your fork and build a CLI-only binary:
 
 ```bash
-git clone https://github.com/<your-user>/cc-connect.git
+git clone https://github.com/Chriz2333/cc-connect.git
 cd cc-connect
 git checkout fix/dingtalk-group-file-send
 go test ./daemon ./platform/dingtalk ./tests/release_local/media_pipeline
