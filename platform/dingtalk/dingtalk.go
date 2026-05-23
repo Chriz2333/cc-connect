@@ -807,11 +807,26 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		"fileName": name,
 		"fileType": ext,
 	})
-	requestBody := map[string]any{
-		"robotCode": p.robotCode,
-		"userIds":   []string{rc.senderStaffId},
-		"msgKey":    "sampleFile",
-		"msgParam":  string(msgParamBytes),
+	var apiURL string
+	var requestBody map[string]any
+	if rc.isGroup && rc.conversationId != "" {
+		apiURL = "https://api.dingtalk.com/v1.0/robot/groupMessages/send"
+		requestBody = map[string]any{
+			"robotCode":          p.robotCode,
+			"openConversationId": rc.conversationId,
+			"msgKey":             "sampleFile",
+			"msgParam":           string(msgParamBytes),
+		}
+	} else if rc.senderStaffId != "" {
+		apiURL = "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend"
+		requestBody = map[string]any{
+			"robotCode": p.robotCode,
+			"userIds":   []string{rc.senderStaffId},
+			"msgKey":    "sampleFile",
+			"msgParam":  string(msgParamBytes),
+		}
+	} else {
+		return fmt.Errorf("dingtalk: SendFile requires conversationId (group) or senderStaffId (direct)")
 	}
 
 	body, err := json.Marshal(requestBody)
@@ -819,9 +834,7 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		return fmt.Errorf("dingtalk: marshal file message: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend",
-		bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("dingtalk: create file request: %w", err)
 	}

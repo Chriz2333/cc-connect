@@ -1,6 +1,8 @@
 package dingtalk
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -8,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/chenhg5/cc-connect/core"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -524,4 +528,183 @@ func TestGetAccessToken_NormalExpireIn_AppliesBuffer(t *testing.T) {
 	if gotWindow < 100*time.Minute || gotWindow > 116*time.Minute {
 		t.Errorf("tokenExpiry window for expireIn=7200 = %v, want ~6900s (100-116min)", gotWindow)
 	}
+}
+
+type captureDingTalkFileSendRT struct {
+	t                *testing.T
+	uploadSeen       bool
+	sendSeen         bool
+	sentRequestBody  map[string]any
+	uploadContentTyp string
+	wantSendPath     string
+}
+
+func (f *captureDingTalkFileSendRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch {
+	case req.URL.Host == "api.dingtalk.com" && req.URL.Path == "/v1.0/oauth2/accessToken":
+		return jsonResponse(http.StatusOK, `{"accessToken":"tok-file","expireIn":7200}`), nil
+	case req.URL.Host == "oapi.dingtalk.com" && req.URL.Path == "/media/upload":
+		f.uploadSeen = true
+		f.uploadContentTyp = req.Header.Get("Content-Type")
+		if got := req.URL.Query().Get("access_token"); got != "tok-file" {
+			f.t.Fatalf("upload access_token = %q, want tok-file", got)
+		}
+		if got := req.URL.Query().Get("type"); got != "file" {
+			f.t.Fatalf("upload type = %q, want file", got)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			f.t.Fatalf("read upload body: %v", err)
+		}
+		if !bytes.Contains(body, []byte("biology pdf")) {
+			f.t.Fatalf("upload body does not contain file bytes: %q", string(body))
+		}
+		if !bytes.Contains(body, []byte("lesson.pdf")) {
+			f.t.Fatalf("upload body does not contain filename: %q", string(body))
+		}
+		return jsonResponse(http.StatusOK, `{"errcode":0,"errmsg":"ok","media_id":"media-file-1","type":"file"}`), nil
+	case req.URL.Host == "api.dingtalk.com" && req.URL.Path == f.wantResolvedSendPath():
+		f.sendSeen = true
+		if got := req.Header.Get("x-acs-dingtalk-access-token"); got != "tok-file" {
+			f.t.Fatalf("send token header = %q, want tok-file", got)
+		}
+		if err := json.NewDecoder(req.Body).Decode(&f.sentRequestBody); err != nil {
+			f.t.Fatalf("decode send body: %v", err)
+		}
+		return jsonResponse(http.StatusOK, `{}`), nil
+	default:
+		f.t.Fatalf("unexpected request: %s %s?%s", req.Method, req.URL.Path, req.URL.RawQuery)
+		return nil, nil
+	}
+}
+
+func (f *captureDingTalkFileSendRT) wantResolvedSendPath() string {
+	if f.wantSendPath != "" {
+		return f.wantSendPath
+	}
+	return "/v1.0/robot/oToMessages/batchSend"
+}
+
+func TestSendFile_UploadsMediaAndSendsFileMessage(t *testing.T) {
+	rt := &captureDingTalkFileSendRT{t: t}
+	p := &Platform{
+		clientID:     "client-id",
+		clientSecret: "client-secret",
+		robotCode:    "robot-code",
+		httpClient:   &http.Client{Transport: rt},
+	}
+
+	err := p.SendFile(contextBackgroundForTest(), replyContext{senderStaffId: "staff-1"}, core.FileAttachment{
+		FileName: "lesson.pdf",
+		Data:     []byte("biology pdf"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if !rt.uploadSeen {
+		t.Fatal("expected media upload request")
+	}
+	if !strings.HasPrefix(rt.uploadContentTyp, "multipart/form-data;") {
+		t.Fatalf("upload content type = %q, want multipart/form-data", rt.uploadContentTyp)
+	}
+	if !rt.sendSeen {
+		t.Fatal("expected file message send request")
+	}
+	if got := rt.sentRequestBody["robotCode"]; got != "robot-code" {
+		t.Fatalf("robotCode = %#v, want robot-code", got)
+	}
+	users, ok := rt.sentRequestBody["userIds"].([]any)
+	if !ok || len(users) != 1 || users[0] != "staff-1" {
+		t.Fatalf("userIds = %#v, want [staff-1]", rt.sentRequestBody["userIds"])
+	}
+	if got := rt.sentRequestBody["msgKey"]; got != "sampleFile" {
+		t.Fatalf("msgKey = %#v, want sampleFile", got)
+	}
+	msgParamRaw, ok := rt.sentRequestBody["msgParam"].(string)
+	if !ok {
+		t.Fatalf("msgParam = %#v, want JSON string", rt.sentRequestBody["msgParam"])
+	}
+	var msgParam map[string]string
+	if err := json.Unmarshal([]byte(msgParamRaw), &msgParam); err != nil {
+		t.Fatalf("decode msgParam %q: %v", msgParamRaw, err)
+	}
+	wantParam := map[string]string{
+		"mediaId":  "media-file-1",
+		"fileName": "lesson.pdf",
+		"fileType": "pdf",
+	}
+	for key, want := range wantParam {
+		if got := msgParam[key]; got != want {
+			t.Fatalf("msgParam[%s] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestSendFile_GroupSessionUsesGroupMessageAPI(t *testing.T) {
+	rt := &captureDingTalkFileSendRT{
+		t:            t,
+		wantSendPath: "/v1.0/robot/groupMessages/send",
+	}
+	p := &Platform{
+		clientID:     "client-id",
+		clientSecret: "client-secret",
+		robotCode:    "robot-code",
+		httpClient:   &http.Client{Transport: rt},
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		conversationId: "group-conv-1",
+		isGroup:        true,
+		proactive:      true,
+	}, core.FileAttachment{
+		FileName: "lesson.pdf",
+		Data:     []byte("biology pdf"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+	if !rt.sendSeen {
+		t.Fatal("expected group file message send request")
+	}
+	if got := rt.sentRequestBody["robotCode"]; got != "robot-code" {
+		t.Fatalf("robotCode = %#v, want robot-code", got)
+	}
+	if got := rt.sentRequestBody["openConversationId"]; got != "group-conv-1" {
+		t.Fatalf("openConversationId = %#v, want group-conv-1", got)
+	}
+	if _, ok := rt.sentRequestBody["userIds"]; ok {
+		t.Fatalf("group file send should not include userIds: %#v", rt.sentRequestBody["userIds"])
+	}
+	if got := rt.sentRequestBody["msgKey"]; got != "sampleFile" {
+		t.Fatalf("msgKey = %#v, want sampleFile", got)
+	}
+	msgParamRaw, ok := rt.sentRequestBody["msgParam"].(string)
+	if !ok {
+		t.Fatalf("msgParam = %#v, want JSON string", rt.sentRequestBody["msgParam"])
+	}
+	var msgParam map[string]string
+	if err := json.Unmarshal([]byte(msgParamRaw), &msgParam); err != nil {
+		t.Fatalf("decode msgParam %q: %v", msgParamRaw, err)
+	}
+	if got := msgParam["mediaId"]; got != "media-file-1" {
+		t.Fatalf("msgParam mediaId = %q, want media-file-1", got)
+	}
+	if got := msgParam["fileName"]; got != "lesson.pdf" {
+		t.Fatalf("msgParam fileName = %q, want lesson.pdf", got)
+	}
+	if got := msgParam["fileType"]; got != "pdf" {
+		t.Fatalf("msgParam fileType = %q, want pdf", got)
+	}
+}
+
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}
+}
+
+func contextBackgroundForTest() context.Context {
+	return context.Background()
 }

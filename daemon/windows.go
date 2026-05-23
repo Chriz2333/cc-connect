@@ -126,6 +126,12 @@ Write-Output $task.State
 	return st, nil
 }
 
+// CheckLinger is only meaningful for Linux user-mode systemd services.
+// Windows Task Scheduler does not have an equivalent linger setting.
+func CheckLinger() (enabled bool, user string) {
+	return true, os.Getenv("USERNAME")
+}
+
 func windowsTaskScriptPath() string {
 	return filepath.Join(DefaultDataDir(), windowsScriptName)
 }
