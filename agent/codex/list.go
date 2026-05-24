@@ -95,6 +95,7 @@ func parseCodexSessionFileWithOptions(path, filterCwd string, includeChildWorkDi
 
 	var sessionID string
 	var sessionCwd string
+	var internalSession bool
 	var summary string
 	var msgCount int
 	userMsgSeen := 0
@@ -119,12 +120,15 @@ func parseCodexSessionFileWithOptions(path, filterCwd string, includeChildWorkDi
 		switch entry.Type {
 		case "session_meta":
 			var meta struct {
-				ID  string `json:"id"`
-				Cwd string `json:"cwd"`
+				ID           string          `json:"id"`
+				Cwd          string          `json:"cwd"`
+				Source       json.RawMessage `json:"source"`
+				ThreadSource string          `json:"thread_source"`
 			}
 			if json.Unmarshal(entry.Payload, &meta) == nil {
 				sessionID = meta.ID
 				sessionCwd = meta.Cwd
+				internalSession = isCodexInternalSessionMeta(meta.Source, meta.ThreadSource)
 			}
 
 		case "response_item":
@@ -160,6 +164,9 @@ func parseCodexSessionFileWithOptions(path, filterCwd string, includeChildWorkDi
 	}
 
 	if sessionID == "" {
+		return nil
+	}
+	if internalSession {
 		return nil
 	}
 
@@ -207,6 +214,21 @@ func samePath(a, b string) bool {
 		return strings.EqualFold(a, b)
 	}
 	return a == b
+}
+
+func isCodexInternalSessionMeta(source json.RawMessage, threadSource string) bool {
+	if strings.EqualFold(strings.TrimSpace(threadSource), "subagent") {
+		return true
+	}
+	if len(source) == 0 {
+		return false
+	}
+	var sourceObj map[string]json.RawMessage
+	if json.Unmarshal(source, &sourceObj) != nil {
+		return false
+	}
+	_, ok := sourceObj["subagent"]
+	return ok
 }
 
 // findSessionFile locates the JSONL transcript for a given session ID.
