@@ -26,6 +26,38 @@ dingtalk:d:<conversationId>:<senderStaffId>
 Older short keys (`dingtalk:d:<conversationId>`) are migrated into the sender
 key so existing direct chats keep their history after upgrade.
 
+## PDF Preview And Native Group Files
+
+By default, the file sender uses DingTalk robot `sampleFile` messages. These
+messages are downloadable attachments, but DingTalk clients may not expose the
+same in-app PDF preview UI as manually uploaded IM files.
+
+For group sessions, an optional native group-file path is available:
+
+1. Query DingTalk storage upload information with
+   `POST /v2.0/storage/spaces/files/{parentDentryUuid}/uploadInfos/query`.
+2. Upload bytes to the returned signed resource URL.
+3. Commit the upload with
+   `POST /v2.0/storage/spaces/files/{parentDentryUuid}/commit`.
+4. Send the committed file into the group with
+   `POST /v1.0/convFile/conversations/files/send`.
+
+This path is opt-in because it requires extra DingTalk permissions and an
+operator `unionId`:
+
+```toml
+[projects.platforms.options]
+file_send_mode = "conv_file"
+file_send_operator_union_id = "operator-union-id"
+file_send_parent_dentry_uuid = "parent-folder-dentry-uuid"
+```
+
+Required DingTalk permissions include enterprise storage upload information,
+enterprise storage file operations, and group file sending permissions. The
+parent dentry UUID should point to the storage folder where cc-connect may write
+temporary outbound files. Direct chats continue to use the robot `sampleFile`
+path because DingTalk's `convFile` APIs are group-file APIs.
+
 ## Build On A Linux Cloud Server
 
 Install Go 1.25 or newer:
@@ -84,6 +116,12 @@ client_id = "your-dingtalk-app-key"
 client_secret = "your-dingtalk-app-secret"
 allow_from = "*"
 share_session_in_channel = true
+
+# Optional: native group-file sending instead of robot sampleFile attachments.
+# Requires the corresponding DingTalk storage and group-file permissions.
+# file_send_mode = "conv_file"
+# file_send_operator_union_id = "operator-union-id"
+# file_send_parent_dentry_uuid = "parent-folder-dentry-uuid"
 ```
 
 ## Start Manually

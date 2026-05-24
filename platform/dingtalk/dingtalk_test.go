@@ -63,7 +63,7 @@ func TestGetAccessToken_ConcurrentAccess(t *testing.T) {
 func TestGetAccessToken_MutexExists(t *testing.T) {
 	// Verify that the tokenMu mutex field exists and works
 	p := &Platform{
-		clientID:    "test_client",
+		clientID:     "test_client",
 		clientSecret: "test_secret",
 	}
 
@@ -720,6 +720,157 @@ func TestSendFile_GroupSessionUsesGroupMessageAPI(t *testing.T) {
 	}
 	if got := msgParam["fileType"]; got != "pdf" {
 		t.Fatalf("msgParam fileType = %q, want pdf", got)
+	}
+}
+
+type captureDingTalkConvFileRT struct {
+	t             *testing.T
+	uploadInfo    map[string]any
+	ossBody       []byte
+	commitBody    map[string]any
+	sendBody      map[string]any
+	ossPutSeen    bool
+	commitSeen    bool
+	sendSeen      bool
+	tokenRequests int
+}
+
+func (f *captureDingTalkConvFileRT) RoundTrip(req *http.Request) (*http.Response, error) {
+	switch {
+	case req.URL.Host == "api.dingtalk.com" && req.URL.Path == "/v1.0/oauth2/accessToken":
+		f.tokenRequests++
+		return jsonResponse(http.StatusOK, `{"accessToken":"tok-file","expireIn":7200}`), nil
+	case req.URL.Host == "api.dingtalk.com" && req.URL.Path == "/v2.0/storage/spaces/files/parent-uuid/uploadInfos/query":
+		if got := req.URL.Query().Get("unionId"); got != "union-1" {
+			f.t.Fatalf("uploadInfos unionId = %q, want union-1", got)
+		}
+		if got := req.Header.Get("x-acs-dingtalk-access-token"); got != "tok-file" {
+			f.t.Fatalf("uploadInfos token = %q, want tok-file", got)
+		}
+		if err := json.NewDecoder(req.Body).Decode(&f.uploadInfo); err != nil {
+			f.t.Fatalf("decode uploadInfo body: %v", err)
+		}
+		return jsonResponse(http.StatusOK, `{
+			"uploadKey":"upload-key-1",
+			"headerSignatureInfo":{
+				"resourceUrls":["https://oss.example.test/upload/path"],
+				"headers":{"x-oss-token":"signed"}
+			}
+		}`), nil
+	case req.URL.Host == "oss.example.test" && req.URL.Path == "/upload/path":
+		f.ossPutSeen = true
+		if req.Method != http.MethodPut {
+			f.t.Fatalf("OSS method = %s, want PUT", req.Method)
+		}
+		if got := req.Header.Get("x-oss-token"); got != "signed" {
+			f.t.Fatalf("OSS signed header = %q, want signed", got)
+		}
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			f.t.Fatalf("read OSS body: %v", err)
+		}
+		f.ossBody = body
+		return jsonResponse(http.StatusOK, ``), nil
+	case req.URL.Host == "api.dingtalk.com" && req.URL.Path == "/v2.0/storage/spaces/files/parent-uuid/commit":
+		f.commitSeen = true
+		if got := req.URL.Query().Get("unionId"); got != "union-1" {
+			f.t.Fatalf("commit unionId = %q, want union-1", got)
+		}
+		if got := req.Header.Get("x-acs-dingtalk-access-token"); got != "tok-file" {
+			f.t.Fatalf("commit token = %q, want tok-file", got)
+		}
+		if err := json.NewDecoder(req.Body).Decode(&f.commitBody); err != nil {
+			f.t.Fatalf("decode commit body: %v", err)
+		}
+		return jsonResponse(http.StatusOK, `{"dentry":{"id":"dentry-1","spaceId":"space-1"}}`), nil
+	case req.URL.Host == "api.dingtalk.com" && req.URL.Path == "/v1.0/convFile/conversations/files/send":
+		f.sendSeen = true
+		if got := req.URL.Query().Get("unionId"); got != "union-1" {
+			f.t.Fatalf("convFile send unionId = %q, want union-1", got)
+		}
+		if got := req.Header.Get("x-acs-dingtalk-access-token"); got != "tok-file" {
+			f.t.Fatalf("convFile send token = %q, want tok-file", got)
+		}
+		if err := json.NewDecoder(req.Body).Decode(&f.sendBody); err != nil {
+			f.t.Fatalf("decode convFile send body: %v", err)
+		}
+		return jsonResponse(http.StatusOK, `{}`), nil
+	default:
+		f.t.Fatalf("unexpected request: %s %s://%s%s?%s", req.Method, req.URL.Scheme, req.URL.Host, req.URL.Path, req.URL.RawQuery)
+		return nil, nil
+	}
+}
+
+func TestSendFile_ConvFileModeUploadsAndSendsGroupFile(t *testing.T) {
+	rt := &captureDingTalkConvFileRT{t: t}
+	p := &Platform{
+		clientID:                 "client-id",
+		clientSecret:             "client-secret",
+		robotCode:                "robot-code",
+		fileSendMode:             "conv_file",
+		fileSendOperatorUnionID:  "union-1",
+		fileSendParentDentryUUID: "parent-uuid",
+		httpClient:               &http.Client{Transport: rt},
+	}
+
+	err := p.SendFile(context.Background(), replyContext{
+		conversationId: "group-conv-1",
+		isGroup:        true,
+	}, core.FileAttachment{
+		FileName: "lesson.pdf",
+		Data:     []byte("biology pdf"),
+	})
+	if err != nil {
+		t.Fatalf("SendFile() error = %v", err)
+	}
+
+	if protocol := rt.uploadInfo["protocol"]; protocol != "HEADER_SIGNATURE" {
+		t.Fatalf("upload protocol = %#v, want HEADER_SIGNATURE", protocol)
+	}
+	option, ok := rt.uploadInfo["option"].(map[string]any)
+	if !ok {
+		t.Fatalf("upload option = %#v, want object", rt.uploadInfo["option"])
+	}
+	preCheck, ok := option["preCheckParam"].(map[string]any)
+	if !ok {
+		t.Fatalf("upload preCheckParam = %#v, want object", option["preCheckParam"])
+	}
+	if got := preCheck["name"]; got != "lesson.pdf" {
+		t.Fatalf("preCheck name = %#v, want lesson.pdf", got)
+	}
+	if got := preCheck["size"]; got != float64(len("biology pdf")) {
+		t.Fatalf("preCheck size = %#v, want %d", got, len("biology pdf"))
+	}
+	if !rt.ossPutSeen {
+		t.Fatal("expected OSS PUT upload")
+	}
+	if string(rt.ossBody) != "biology pdf" {
+		t.Fatalf("OSS body = %q, want biology pdf", string(rt.ossBody))
+	}
+	if !rt.commitSeen {
+		t.Fatal("expected storage commit request")
+	}
+	if got := rt.commitBody["uploadKey"]; got != "upload-key-1" {
+		t.Fatalf("commit uploadKey = %#v, want upload-key-1", got)
+	}
+	if got := rt.commitBody["name"]; got != "lesson.pdf" {
+		t.Fatalf("commit name = %#v, want lesson.pdf", got)
+	}
+	if !rt.sendSeen {
+		t.Fatal("expected convFile send request")
+	}
+	wantSend := map[string]string{
+		"spaceId":            "space-1",
+		"dentryId":           "dentry-1",
+		"openConversationId": "group-conv-1",
+	}
+	for key, want := range wantSend {
+		if got := rt.sendBody[key]; got != want {
+			t.Fatalf("convFile send %s = %#v, want %q", key, got, want)
+		}
+	}
+	if rt.tokenRequests != 1 {
+		t.Fatalf("token requests = %d, want 1 cached token request", rt.tokenRequests)
 	}
 }
 

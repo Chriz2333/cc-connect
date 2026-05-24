@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -27,11 +28,11 @@ func init() {
 }
 
 type replyContext struct {
-	sessionWebhook  string
-	conversationId  string
-	senderStaffId   string
-	isGroup         bool
-	proactive       bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
+	sessionWebhook string
+	conversationId string
+	senderStaffId  string
+	isGroup        bool
+	proactive      bool // true when constructed by ReconstructReplyCtx (no sessionWebhook)
 }
 
 // richTextContent mirrors the full structure of the DingTalk "text" JSON field,
@@ -60,7 +61,7 @@ type Platform struct {
 	clientID              string
 	clientSecret          string
 	robotCode             string
-	agentID               int64    // Agent ID for work notifications API (numeric)
+	agentID               int64 // Agent ID for work notifications API (numeric)
 	allowFrom             string
 	shareSessionInChannel bool
 	streamClient          *dingtalkClient.StreamClient
@@ -77,6 +78,11 @@ type Platform struct {
 	cardThrottleMs  int
 	degradeUntil    time.Time
 	degradeMu       sync.Mutex
+	// Optional native DingTalk group-file delivery. The legacy robot sampleFile
+	// channel remains the default because convFile requires extra storage scopes.
+	fileSendMode             string
+	fileSendOperatorUnionID  string
+	fileSendParentDentryUUID string
 }
 
 func New(opts map[string]any) (core.Platform, error) {
@@ -123,18 +129,30 @@ func New(opts map[string]any) (core.Platform, error) {
 	} else if v, ok := opts["card_throttle_ms"].(int); ok && v > 0 {
 		cardThrottleMs = v
 	}
+	fileSendMode, _ := opts["file_send_mode"].(string)
+	fileSendOperatorUnionID, _ := opts["file_send_operator_union_id"].(string)
+	if fileSendOperatorUnionID == "" {
+		fileSendOperatorUnionID, _ = opts["operator_union_id"].(string)
+	}
+	fileSendParentDentryUUID, _ := opts["file_send_parent_dentry_uuid"].(string)
+	if fileSendParentDentryUUID == "" {
+		fileSendParentDentryUUID, _ = opts["parent_dentry_uuid"].(string)
+	}
 
 	return &Platform{
-		clientID:              clientID,
-		clientSecret:          clientSecret,
-		robotCode:             robotCode,
-		agentID:               agentID,
-		allowFrom:             allowFrom,
-		shareSessionInChannel: shareSessionInChannel,
-		httpClient:            &http.Client{Timeout: 30 * time.Second},
-		cardTemplateID:        cardTemplateID,
-		cardTemplateKey:       cardTemplateKey,
-		cardThrottleMs:        cardThrottleMs,
+		clientID:                 clientID,
+		clientSecret:             clientSecret,
+		robotCode:                robotCode,
+		agentID:                  agentID,
+		allowFrom:                allowFrom,
+		shareSessionInChannel:    shareSessionInChannel,
+		httpClient:               &http.Client{Timeout: 30 * time.Second},
+		cardTemplateID:           cardTemplateID,
+		cardTemplateKey:          cardTemplateKey,
+		cardThrottleMs:           cardThrottleMs,
+		fileSendMode:             strings.TrimSpace(fileSendMode),
+		fileSendOperatorUnionID:  strings.TrimSpace(fileSendOperatorUnionID),
+		fileSendParentDentryUUID: strings.TrimSpace(fileSendParentDentryUUID),
 	}, nil
 }
 
@@ -300,10 +318,10 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			isGroup:        data.ConversationType == "2",
 		},
 	}
 
@@ -368,12 +386,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 				MessageID:  data.MsgId,
 				ChannelKey: data.ConversationId,
 				ReplyCtx: replyContext{
-					sessionWebhook:  data.SessionWebhook,
-					conversationId:  data.ConversationId,
-					senderStaffId:   data.SenderStaffId,
-					isGroup:         data.ConversationType == "2",
+					sessionWebhook: data.SessionWebhook,
+					conversationId: data.ConversationId,
+					senderStaffId:  data.SenderStaffId,
+					isGroup:        data.ConversationType == "2",
 				},
-				FromVoice:  true,
+				FromVoice: true,
 			}
 			p.handler(p, msg)
 		}
@@ -392,12 +410,12 @@ func (p *Platform) handleAudioMessage(data *chatbot.BotCallbackDataModel, sessio
 		MessageID:  data.MsgId,
 		ChannelKey: data.ConversationId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
-			isGroup:         data.ConversationType == "2",
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
+			isGroup:        data.ConversationType == "2",
 		},
-		FromVoice:  true,
+		FromVoice: true,
 		Audio: &core.AudioAttachment{
 			MimeType: mimeType,
 			Data:     audioBytes,
@@ -468,9 +486,9 @@ func (p *Platform) handleImageMessage(data *chatbot.BotCallbackDataModel, sessio
 		UserName:   data.SenderNick,
 		MessageID:  data.MsgId,
 		ReplyCtx: replyContext{
-			sessionWebhook:  data.SessionWebhook,
-			conversationId:  data.ConversationId,
-			senderStaffId:   data.SenderStaffId,
+			sessionWebhook: data.SessionWebhook,
+			conversationId: data.ConversationId,
+			senderStaffId:  data.SenderStaffId,
 		},
 		Images: []core.ImageAttachment{{
 			MimeType: mimeType,
@@ -785,12 +803,23 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 		name = "file"
 	}
 
-	mediaID, err := p.uploadMedia(ctx, file.Data, name, "file")
+	if strings.EqualFold(p.fileSendMode, "conv_file") {
+		if rc.isGroup && rc.conversationId != "" {
+			return p.sendGroupConvFile(ctx, rc, file.Data, name)
+		}
+		slog.Warn("dingtalk: conv_file mode only supports group sessions, falling back to sampleFile", "name", name)
+	}
+
+	return p.sendSampleFile(ctx, rc, file.Data, name)
+}
+
+func (p *Platform) sendSampleFile(ctx context.Context, rc replyContext, data []byte, name string) error {
+	mediaID, err := p.uploadMedia(ctx, data, name, "file")
 	if err != nil {
 		return fmt.Errorf("dingtalk: upload file: %w", err)
 	}
 
-	slog.Debug("dingtalk: file uploaded", "media_id", mediaID, "name", name, "size", len(file.Data))
+	slog.Debug("dingtalk: file uploaded", "media_id", mediaID, "name", name, "size", len(data))
 
 	token, err := p.getAccessToken()
 	if err != nil {
@@ -855,6 +884,192 @@ func (p *Platform) SendFile(ctx context.Context, rctx any, file core.FileAttachm
 	}
 
 	slog.Info("dingtalk: file message sent", "media_id", mediaID, "name", name, "user", rc.senderStaffId)
+	return nil
+}
+
+func (p *Platform) sendGroupConvFile(ctx context.Context, rc replyContext, data []byte, name string) error {
+	if p.fileSendOperatorUnionID == "" {
+		return fmt.Errorf("dingtalk: conv_file mode requires file_send_operator_union_id")
+	}
+	if p.fileSendParentDentryUUID == "" {
+		return fmt.Errorf("dingtalk: conv_file mode requires file_send_parent_dentry_uuid")
+	}
+
+	uploadInfo, err := p.queryStorageUploadInfo(ctx, p.fileSendParentDentryUUID, p.fileSendOperatorUnionID, name, len(data))
+	if err != nil {
+		return fmt.Errorf("dingtalk: query storage upload info: %w", err)
+	}
+	if err := p.putStorageFile(ctx, uploadInfo, data); err != nil {
+		return fmt.Errorf("dingtalk: upload storage file: %w", err)
+	}
+	dentry, err := p.commitStorageFile(ctx, p.fileSendParentDentryUUID, p.fileSendOperatorUnionID, uploadInfo.UploadKey, name, len(data))
+	if err != nil {
+		return fmt.Errorf("dingtalk: commit storage file: %w", err)
+	}
+	if dentry.SpaceID == "" || dentry.ID == "" {
+		return fmt.Errorf("dingtalk: commit storage file returned incomplete dentry: spaceId=%q id=%q", dentry.SpaceID, dentry.ID)
+	}
+	if err := p.sendConvFileToGroup(ctx, p.fileSendOperatorUnionID, dentry.SpaceID, dentry.ID, rc.conversationId); err != nil {
+		return fmt.Errorf("dingtalk: send conv file: %w", err)
+	}
+
+	slog.Info("dingtalk: conv file message sent", "space_id", dentry.SpaceID, "dentry_id", dentry.ID, "name", name, "conversation_id", rc.conversationId)
+	return nil
+}
+
+type dingtalkStorageUploadInfo struct {
+	UploadKey           string `json:"uploadKey"`
+	HeaderSignatureInfo struct {
+		ResourceURLs []string          `json:"resourceUrls"`
+		Headers      map[string]string `json:"headers"`
+	} `json:"headerSignatureInfo"`
+}
+
+type dingtalkStorageDentry struct {
+	ID      string `json:"id"`
+	SpaceID string `json:"spaceId"`
+}
+
+func (p *Platform) queryStorageUploadInfo(ctx context.Context, parentDentryUUID, unionID, name string, size int) (*dingtalkStorageUploadInfo, error) {
+	token, err := p.getAccessToken()
+	if err != nil {
+		return nil, fmt.Errorf("get access token: %w", err)
+	}
+	apiURL := fmt.Sprintf("https://api.dingtalk.com/v2.0/storage/spaces/files/%s/uploadInfos/query?unionId=%s",
+		url.PathEscape(parentDentryUUID), url.QueryEscape(unionID))
+	body, err := json.Marshal(map[string]any{
+		"protocol": "HEADER_SIGNATURE",
+		"option": map[string]any{
+			"storageDriver": "DINGTALK",
+			"preCheckParam": map[string]any{
+				"size": size,
+				"name": name,
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+	var uploadInfo dingtalkStorageUploadInfo
+	if err := json.Unmarshal(respBody, &uploadInfo); err != nil {
+		return nil, fmt.Errorf("decode response: %w, body=%s", err, string(respBody))
+	}
+	if uploadInfo.UploadKey == "" {
+		return nil, fmt.Errorf("empty uploadKey in response: %s", string(respBody))
+	}
+	if len(uploadInfo.HeaderSignatureInfo.ResourceURLs) == 0 {
+		return nil, fmt.Errorf("empty resourceUrls in response: %s", string(respBody))
+	}
+	return &uploadInfo, nil
+}
+
+func (p *Platform) putStorageFile(ctx context.Context, uploadInfo *dingtalkStorageUploadInfo, data []byte) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadInfo.HeaderSignatureInfo.ResourceURLs[0], bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	for k, v := range uploadInfo.HeaderSignatureInfo.Headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func (p *Platform) commitStorageFile(ctx context.Context, parentDentryUUID, unionID, uploadKey, name string, size int) (*dingtalkStorageDentry, error) {
+	token, err := p.getAccessToken()
+	if err != nil {
+		return nil, fmt.Errorf("get access token: %w", err)
+	}
+	apiURL := fmt.Sprintf("https://api.dingtalk.com/v2.0/storage/spaces/files/%s/commit?unionId=%s",
+		url.PathEscape(parentDentryUUID), url.QueryEscape(unionID))
+	body, err := json.Marshal(map[string]any{
+		"uploadKey": uploadKey,
+		"name":      name,
+		"option": map[string]any{
+			"size":               size,
+			"conflictStrategy":   "AUTO_RENAME",
+			"convertToOnlineDoc": false,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
+	var commitResp struct {
+		Dentry dingtalkStorageDentry `json:"dentry"`
+	}
+	if err := json.Unmarshal(respBody, &commitResp); err != nil {
+		return nil, fmt.Errorf("decode response: %w, body=%s", err, string(respBody))
+	}
+	return &commitResp.Dentry, nil
+}
+
+func (p *Platform) sendConvFileToGroup(ctx context.Context, unionID, spaceID, dentryID, openConversationID string) error {
+	token, err := p.getAccessToken()
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+	apiURL := fmt.Sprintf("https://api.dingtalk.com/v1.0/convFile/conversations/files/send?unionId=%s", url.QueryEscape(unionID))
+	body, err := json.Marshal(map[string]string{
+		"spaceId":            spaceID,
+		"dentryId":           dentryID,
+		"openConversationId": openConversationID,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-acs-dingtalk-access-token", token)
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("status=%d, body=%s", resp.StatusCode, string(respBody))
+	}
 	return nil
 }
 
@@ -1005,8 +1220,8 @@ func (p *Platform) compressAudioWithFFmpeg(ctx context.Context, audio []byte, fo
 	args := []string{
 		"-i", "pipe:0",
 		"-ar", "16000", // 16kHz sample rate for voice
-		"-ac", "1",     // mono
-		"-b:a", "64k",  // 64 kbps bitrate (voice quality)
+		"-ac", "1", // mono
+		"-b:a", "64k", // 64 kbps bitrate (voice quality)
 		"-f", "mp3",
 		"-y",
 		"pipe:1",
