@@ -469,6 +469,11 @@ func (e *Engine) SetPerSessionWorkDir(mode, base string) {
 	e.sessions.ConfigurePerSessionWorkDir(mode, base)
 	enabled := mode == "per_session" && strings.TrimSpace(base) != ""
 	e.perSessionWorkDir = enabled
+	if enabled {
+		if setter, ok := e.agent.(WorkDirListBaseSetter); ok {
+			setter.SetListWorkDirBase(strings.TrimSpace(base))
+		}
+	}
 	if enabled && e.workspacePool == nil {
 		e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
 		go e.runIdleReaper()

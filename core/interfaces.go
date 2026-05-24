@@ -476,6 +476,13 @@ type WorkDirSwitcher interface {
 	GetWorkDir() string
 }
 
+// WorkDirListBaseSetter is an optional interface for agents that can list
+// sessions from a base directory while individual sessions run in child
+// directories.
+type WorkDirListBaseSetter interface {
+	SetListWorkDirBase(dir string)
+}
+
 // AgentOptsProvider is an optional interface for agents that need to carry
 // their full configuration options when the engine clones a per-workspace
 // agent instance in multi-workspace mode. The engine merges the returned map

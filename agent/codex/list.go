@@ -33,6 +33,10 @@ func resolveCodexHomeDir(explicit string) string {
 // listCodexSessions scans the codex sessions directory for JSONL transcript
 // files whose cwd matches workDir.
 func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, error) {
+	return listCodexSessionsWithOptions(workDir, codexHome, false)
+}
+
+func listCodexSessionsWithOptions(workDir, codexHome string, includeChildWorkDirs bool) ([]core.AgentSessionInfo, error) {
 	absWorkDir, err := filepath.Abs(workDir)
 	if err != nil {
 		absWorkDir = workDir
@@ -57,7 +61,7 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 
 	var sessions []core.AgentSessionInfo
 	for _, f := range files {
-		info := parseCodexSessionFile(f, absWorkDir)
+		info := parseCodexSessionFileWithOptions(f, absWorkDir, includeChildWorkDirs)
 		if info != nil {
 			patchSessionSource(info.ID, codexHome)
 			sessions = append(sessions, *info)
@@ -74,6 +78,10 @@ func listCodexSessions(workDir, codexHome string) ([]core.AgentSessionInfo, erro
 // parseCodexSessionFile reads a Codex JSONL transcript.
 // Returns nil if the session's cwd doesn't match filterCwd.
 func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
+	return parseCodexSessionFileWithOptions(path, filterCwd, false)
+}
+
+func parseCodexSessionFileWithOptions(path, filterCwd string, includeChildWorkDirs bool) *core.AgentSessionInfo {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
@@ -147,7 +155,7 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 	}
 
 	// Filter by cwd
-	if filterCwd != "" && sessionCwd != "" && sessionCwd != filterCwd {
+	if !codexSessionCwdMatches(sessionCwd, filterCwd, includeChildWorkDirs) {
 		return nil
 	}
 
@@ -165,6 +173,40 @@ func parseCodexSessionFile(path, filterCwd string) *core.AgentSessionInfo {
 		MessageCount: msgCount,
 		ModifiedAt:   stat.ModTime(),
 	}
+}
+
+func codexSessionCwdMatches(sessionCwd, filterCwd string, includeChildWorkDirs bool) bool {
+	if filterCwd == "" || sessionCwd == "" {
+		return true
+	}
+	absSessionCwd, err := filepath.Abs(sessionCwd)
+	if err == nil {
+		sessionCwd = absSessionCwd
+	}
+	absFilterCwd, err := filepath.Abs(filterCwd)
+	if err == nil {
+		filterCwd = absFilterCwd
+	}
+	sessionCwd = filepath.Clean(sessionCwd)
+	filterCwd = filepath.Clean(filterCwd)
+	if samePath(sessionCwd, filterCwd) {
+		return true
+	}
+	if !includeChildWorkDirs {
+		return false
+	}
+	rel, err := filepath.Rel(filterCwd, sessionCwd)
+	if err != nil {
+		return false
+	}
+	return rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+}
+
+func samePath(a, b string) bool {
+	if filepath.Separator == '\\' {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // findSessionFile locates the JSONL transcript for a given session ID.

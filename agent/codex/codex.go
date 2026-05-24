@@ -28,19 +28,20 @@ func init() {
 //   - "full-auto": --full-auto (sandbox-protected auto execution)
 //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
 type Agent struct {
-	workDir         string
-	model           string
-	reasoningEffort string
-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
-	backend         string // "exec" | "app_server"
-	appServerURL    string
-	codexHome       string
-	cliBin          string   // CLI binary name, default "codex"
-	cliExtraArgs    []string // extra args parsed from cli_path after the binary
-	providers       []core.ProviderConfig
-	activeIdx       int // -1 = no provider set
-	sessionEnv      []string
-	mu              sync.RWMutex
+	workDir              string
+	listWorkDirRecursive bool
+	model                string
+	reasoningEffort      string
+	mode                 string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+	backend              string // "exec" | "app_server"
+	appServerURL         string
+	codexHome            string
+	cliBin               string   // CLI binary name, default "codex"
+	cliExtraArgs         []string // extra args parsed from cli_path after the binary
+	providers            []core.ProviderConfig
+	activeIdx            int // -1 = no provider set
+	sessionEnv           []string
+	mu                   sync.RWMutex
 }
 
 func New(opts map[string]any) (core.Agent, error) {
@@ -137,6 +138,7 @@ func (a *Agent) SetWorkDir(dir string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.workDir = dir
+	a.listWorkDirRecursive = false
 	slog.Info("codex: work_dir changed", "work_dir", dir)
 }
 
@@ -144,6 +146,14 @@ func (a *Agent) GetWorkDir() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.workDir
+}
+
+func (a *Agent) SetListWorkDirBase(dir string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.workDir = dir
+	a.listWorkDirRecursive = true
+	slog.Info("codex: list work_dir base changed", "work_dir_base", dir)
 }
 
 func (a *Agent) SetModel(model string) {
@@ -375,8 +385,9 @@ func (a *Agent) ListSessions(_ context.Context) ([]core.AgentSessionInfo, error)
 	a.mu.RLock()
 	codexHome := a.codexHome
 	workDir := a.workDir
+	recursive := a.listWorkDirRecursive
 	a.mu.RUnlock()
-	return listCodexSessions(workDir, codexHome)
+	return listCodexSessionsWithOptions(workDir, codexHome, recursive)
 }
 
 func (a *Agent) GetSessionHistory(_ context.Context, sessionID string, limit int) ([]core.HistoryEntry, error) {
