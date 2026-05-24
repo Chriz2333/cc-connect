@@ -578,6 +578,39 @@ func (a *namedStubWorkDirAgent) Name() string {
 	return a.name
 }
 
+type perSessionWorkDirAgent struct {
+	name         string
+	workDir      string
+	session      AgentSession
+	startedInDir *string
+}
+
+func (a *perSessionWorkDirAgent) Name() string {
+	return a.name
+}
+
+func (a *perSessionWorkDirAgent) StartSession(_ context.Context, _ string) (AgentSession, error) {
+	if a.startedInDir != nil {
+		*a.startedInDir = a.workDir
+	}
+	if a.session != nil {
+		return a.session, nil
+	}
+	return newResultAgentSession("ok"), nil
+}
+
+func (a *perSessionWorkDirAgent) ListSessions(_ context.Context) ([]AgentSessionInfo, error) {
+	return nil, nil
+}
+
+func (a *perSessionWorkDirAgent) Stop() error {
+	return nil
+}
+
+func (a *perSessionWorkDirAgent) GetWorkDir() string {
+	return a.workDir
+}
+
 type stubListAgent struct {
 	stubAgent
 	sessions []AgentSessionInfo
@@ -4228,6 +4261,358 @@ func TestWorkspaceContext_PerChannelIndependence(t *testing.T) {
 	}
 	if got := agentB.(interface{ GetWorkDir() string }).GetWorkDir(); got != dirB {
 		t.Fatalf("agentB workDir = %q, want %q", got, dirB)
+	}
+}
+
+func TestEngine_PerSessionWorkDirStartsAgentInSessionWorkDir(t *testing.T) {
+	agentName := "test-per-session-workdir"
+	var createdMu sync.Mutex
+	var createdWorkDirs []string
+	var startedInDir string
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		createdMu.Lock()
+		createdWorkDirs = append(createdWorkDirs, workDir)
+		createdMu.Unlock()
+		return &perSessionWorkDirAgent{
+			name:         agentName,
+			workDir:      workDir,
+			session:      newResultAgentSession("per-session ok"),
+			startedInDir: &startedInDir,
+		}, nil
+	})
+
+	p := &stubPlatformEngine{n: "plain"}
+	base := t.TempDir()
+	globalAgent := &perSessionWorkDirAgent{name: agentName, workDir: t.TempDir()}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+
+	e.SetPerSessionWorkDir("per_session", base)
+	if e.multiWorkspace {
+		t.Fatal("SetPerSessionWorkDir must not enable full multi-workspace mode")
+	}
+	if e.workspacePool == nil {
+		t.Fatal("SetPerSessionWorkDir should initialize workspace pool")
+	}
+
+	msg := &Message{
+		SessionKey: "plain:user1",
+		UserID:     "user1",
+		UserName:   "User One",
+		Platform:   "plain",
+		Content:    "hello",
+		ReplyCtx:   "ctx",
+	}
+
+	e.handleMessage(p, msg)
+
+	sent := waitForPlatformSend(p, 1, 3*time.Second)
+	if len(sent) == 0 || !strings.Contains(sent[0], "per-session ok") {
+		t.Fatalf("sent = %#v, want agent result", sent)
+	}
+
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if session.WorkDir == "" {
+		t.Fatal("active session WorkDir is empty")
+	}
+	wantWorkDir := normalizeWorkspacePath(session.WorkDir)
+	cleanBase := filepath.Clean(base)
+	if !strings.HasPrefix(filepath.Clean(session.WorkDir), cleanBase+string(os.PathSeparator)) {
+		t.Fatalf("session WorkDir = %q, want under %q", session.WorkDir, base)
+	}
+
+	createdMu.Lock()
+	gotCreated := append([]string(nil), createdWorkDirs...)
+	createdMu.Unlock()
+	if len(gotCreated) != 1 {
+		t.Fatalf("created work dirs = %#v, want one workspace agent", gotCreated)
+	}
+	if normalizeWorkspacePath(gotCreated[0]) != wantWorkDir {
+		t.Fatalf("created work_dir = %q, want %q", gotCreated[0], wantWorkDir)
+	}
+	if normalizeWorkspacePath(startedInDir) != wantWorkDir {
+		t.Fatalf("StartSession ran on agent work_dir = %q, want %q", startedInDir, wantWorkDir)
+	}
+
+	e.interactiveMu.Lock()
+	_, hasPlainKey := e.interactiveStates[msg.SessionKey]
+	_, hasWorkDirKey := e.interactiveStates[wantWorkDir+":"+msg.SessionKey]
+	e.interactiveMu.Unlock()
+	if hasPlainKey {
+		t.Fatalf("interactive state used plain session key; want per-session workdir key")
+	}
+	if !hasWorkDirKey {
+		t.Fatalf("interactive state missing per-session workdir key %q", wantWorkDir+":"+msg.SessionKey)
+	}
+
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "result-session" {
+		t.Fatalf("global session agent id = %q, want result-session", got)
+	}
+	ws := e.workspacePool.Get(wantWorkDir)
+	if ws == nil || ws.sessions == nil {
+		t.Fatal("workspace pool missing per-session workspace state")
+	}
+	if got := ws.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "" {
+		t.Fatalf("workspace session manager agent id = %q, want unused", got)
+	}
+}
+
+func TestEngine_PerSessionWorkDirStopUsesSessionInteractiveKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.SetPerSessionWorkDir("per_session", t.TempDir())
+
+	msg := &Message{SessionKey: "plain:user-stop", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if session.WorkDir == "" {
+		t.Fatal("session WorkDir is empty")
+	}
+	iKey := normalizeWorkspacePath(session.WorkDir) + ":" + msg.SessionKey
+	sess := newControllableSession("stop-per-session")
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Unlock()
+
+	e.cmdStop(p, msg)
+
+	select {
+	case <-sess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected /stop to close per-session interactive state")
+	}
+	sent := p.getSent()
+	if len(sent) == 0 || !strings.Contains(sent[len(sent)-1], e.i18n.T(MsgExecutionStopped)) {
+		t.Fatalf("sent = %#v, want execution stopped", sent)
+	}
+	e.interactiveMu.Lock()
+	_, exists := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if exists {
+		t.Fatal("per-session interactive state still exists after /stop")
+	}
+}
+
+func TestEngine_PerSessionWorkDirNewCleansOldInteractiveKey(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.SetPerSessionWorkDir("per_session", t.TempDir())
+
+	msg := &Message{SessionKey: "plain:user-new", ReplyCtx: "ctx"}
+	oldSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	oldWorkDir := normalizeWorkspacePath(oldSession.WorkDir)
+	iKey := oldWorkDir + ":" + msg.SessionKey
+	sess := newControllableSession("new-per-session")
+	e.interactiveMu.Lock()
+	e.interactiveStates[iKey] = &interactiveState{agentSession: sess, platform: p, replyCtx: "ctx"}
+	e.interactiveMu.Unlock()
+
+	e.cmdNew(p, msg, []string{"next"})
+
+	select {
+	case <-sess.closed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected /new to close old per-session interactive state")
+	}
+	e.interactiveMu.Lock()
+	_, oldExists := e.interactiveStates[iKey]
+	e.interactiveMu.Unlock()
+	if oldExists {
+		t.Fatal("old per-session interactive state still exists after /new")
+	}
+	newSession := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if newSession.WorkDir == "" {
+		t.Fatal("new session WorkDir is empty")
+	}
+	if normalizeWorkspacePath(newSession.WorkDir) == oldWorkDir {
+		t.Fatalf("/new reused old WorkDir %q", oldWorkDir)
+	}
+}
+
+func TestEngine_PerSessionWorkDirCommandWorkDirCreatesActiveSession(t *testing.T) {
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetPerSessionWorkDir("per_session", t.TempDir())
+
+	msg := &Message{SessionKey: "plain:first-command"}
+	got := e.commandWorkDir(agent, msg)
+	if got == "" {
+		t.Fatal("commandWorkDir returned empty dir")
+	}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if session.WorkDir == "" {
+		t.Fatal("commandWorkDir did not create active session WorkDir")
+	}
+	if got != normalizeWorkspacePath(session.WorkDir) {
+		t.Fatalf("commandWorkDir = %q, want session WorkDir %q", got, session.WorkDir)
+	}
+}
+
+func TestRenderCards_PerSessionWorkDirUsesSessionDirectory(t *testing.T) {
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{&stubPlatformEngine{n: "plain"}}, "", LangEnglish)
+	e.SetPerSessionWorkDir("per_session", t.TempDir())
+	sessionKey := "plain:cards"
+	session := e.sessions.GetOrCreateActive(sessionKey)
+	if session.WorkDir == "" {
+		t.Fatal("session WorkDir is empty")
+	}
+	want := normalizeWorkspacePath(session.WorkDir)
+
+	status := e.renderStatusCard(sessionKey, "user1").RenderText()
+	if !strings.Contains(status, want) {
+		t.Fatalf("status card = %q, want session WorkDir %q", status, want)
+	}
+	if strings.Contains(status, normalizeWorkspacePath(agent.workDir)) {
+		t.Fatalf("status card used global agent WorkDir %q: %q", agent.workDir, status)
+	}
+
+	dirCard, err := e.renderDirCard(sessionKey, 1)
+	if err != nil {
+		t.Fatalf("renderDirCard: %v", err)
+	}
+	dirText := dirCard.RenderText()
+	if !strings.Contains(dirText, want) {
+		t.Fatalf("dir card = %q, want session WorkDir %q", dirText, want)
+	}
+	if strings.Contains(dirText, normalizeWorkspacePath(agent.workDir)) {
+		t.Fatalf("dir card used global agent WorkDir %q: %q", agent.workDir, dirText)
+	}
+}
+
+func TestPromptCustomCommand_PerSessionUsesSessionWorkDir(t *testing.T) {
+	agentName := "test-per-session-custom-command"
+	var workspaceStartedInDir string
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		return &perSessionWorkDirAgent{
+			name:         agentName,
+			workDir:      workDir,
+			session:      newResultAgentSession("custom command ok"),
+			startedInDir: &workspaceStartedInDir,
+		}, nil
+	})
+
+	p := &stubPlatformEngine{n: "plain"}
+	var globalStartedInDir string
+	globalAgent := &perSessionWorkDirAgent{
+		name:         agentName,
+		workDir:      t.TempDir(),
+		session:      newResultAgentSession("global command should not run"),
+		startedInDir: &globalStartedInDir,
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.SetPerSessionWorkDir("per_session", t.TempDir())
+
+	msg := &Message{SessionKey: "plain:custom-command", UserID: "user1", UserName: "User", Platform: "plain", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	wantWorkDir := normalizeWorkspacePath(session.WorkDir)
+
+	e.executeCustomCommand(p, msg, &CustomCommand{Name: "plan", Prompt: "make a plan", Source: "test"}, []string{"now"})
+
+	sent := waitForPlatformSend(p, 1, 3*time.Second)
+	if len(sent) == 0 || !strings.Contains(sent[0], "custom command ok") {
+		t.Fatalf("sent = %#v, want custom command result", sent)
+	}
+	if normalizeWorkspacePath(workspaceStartedInDir) != wantWorkDir {
+		t.Fatalf("workspace agent StartSession workDir = %q, want %q", workspaceStartedInDir, wantWorkDir)
+	}
+	if globalStartedInDir != "" {
+		t.Fatalf("global agent unexpectedly started in %q", globalStartedInDir)
+	}
+	assertNoActiveSessionForInteractiveKey(t, e, wantWorkDir+":"+msg.SessionKey)
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "result-session" {
+		t.Fatalf("raw active session agent id = %q, want result-session", got)
+	}
+}
+
+func TestSkill_PerSessionUsesSessionWorkDir(t *testing.T) {
+	agentName := "test-per-session-skill"
+	var workspaceStartedInDir string
+	RegisterAgent(agentName, func(opts map[string]any) (Agent, error) {
+		workDir, _ := opts["work_dir"].(string)
+		return &perSessionWorkDirAgent{
+			name:         agentName,
+			workDir:      workDir,
+			session:      newResultAgentSession("skill ok"),
+			startedInDir: &workspaceStartedInDir,
+		}, nil
+	})
+
+	p := &stubPlatformEngine{n: "plain"}
+	var globalStartedInDir string
+	globalAgent := &perSessionWorkDirAgent{
+		name:         agentName,
+		workDir:      t.TempDir(),
+		session:      newResultAgentSession("global skill should not run"),
+		startedInDir: &globalStartedInDir,
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.SetPerSessionWorkDir("per_session", t.TempDir())
+
+	msg := &Message{SessionKey: "plain:skill", UserID: "user1", UserName: "User", Platform: "plain", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	wantWorkDir := normalizeWorkspacePath(session.WorkDir)
+	skill := &Skill{Name: "demo-skill", Description: "demo", Prompt: "do the thing", Source: "test"}
+
+	e.executeSkill(p, msg, skill, []string{"now"})
+
+	sent := waitForPlatformSend(p, 1, 3*time.Second)
+	if len(sent) == 0 || !strings.Contains(sent[0], "skill ok") {
+		t.Fatalf("sent = %#v, want skill result", sent)
+	}
+	if normalizeWorkspacePath(workspaceStartedInDir) != wantWorkDir {
+		t.Fatalf("workspace agent StartSession workDir = %q, want %q", workspaceStartedInDir, wantWorkDir)
+	}
+	if globalStartedInDir != "" {
+		t.Fatalf("global agent unexpectedly started in %q", globalStartedInDir)
+	}
+	assertNoActiveSessionForInteractiveKey(t, e, wantWorkDir+":"+msg.SessionKey)
+	if got := e.sessions.GetOrCreateActive(msg.SessionKey).AgentSessionID; got != "result-session" {
+		t.Fatalf("raw active session agent id = %q, want result-session", got)
+	}
+}
+
+func TestExecCustomCommand_PerSessionDefaultWorkDir(t *testing.T) {
+	p := &stubPlatformEngine{n: "plain"}
+	agent := &stubWorkDirAgent{workDir: t.TempDir()}
+	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	e.SetAdminFrom("*")
+	e.SetPerSessionWorkDir("per_session", t.TempDir())
+
+	msg := &Message{SessionKey: "plain:custom-exec", UserID: "user1", ReplyCtx: "ctx"}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	wantWorkDir := normalizeWorkspacePath(session.WorkDir)
+
+	e.executeCustomCommand(p, msg, &CustomCommand{Name: "pwd", Exec: "Get-Location | Select-Object -ExpandProperty Path", Source: "test"}, nil)
+
+	sent := waitForPlatformSend(p, 1, 3*time.Second)
+	if len(sent) == 0 {
+		t.Fatal("expected exec command output")
+	}
+	found := false
+	for _, line := range sent {
+		if strings.Contains(normalizeWorkspacePath(line), wantWorkDir) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("exec command output = %#v, want workdir %q", sent, wantWorkDir)
+	}
+}
+
+func assertNoActiveSessionForInteractiveKey(t *testing.T, e *Engine, interactiveKey string) {
+	t.Helper()
+	e.sessions.mu.RLock()
+	defer e.sessions.mu.RUnlock()
+	if sid := e.sessions.activeSession[interactiveKey]; sid != "" {
+		t.Fatalf("unexpected active session for interactive key %q: %s", interactiveKey, sid)
 	}
 }
 

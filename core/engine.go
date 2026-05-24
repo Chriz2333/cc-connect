@@ -243,6 +243,7 @@ type Engine struct {
 
 	// Multi-workspace mode
 	multiWorkspace               bool
+	perSessionWorkDir            bool
 	baseDir                      string
 	skipGit                      bool
 	workspaceInitAllowLocalPaths bool
@@ -462,6 +463,18 @@ func (e *Engine) SetMultiWorkspace(baseDir, bindingStorePath string) {
 	go e.runIdleReaper()
 }
 
+// SetPerSessionWorkDir enables per-session workdir allocation without enabling
+// the full multi-workspace command flow.
+func (e *Engine) SetPerSessionWorkDir(mode, base string) {
+	e.sessions.ConfigurePerSessionWorkDir(mode, base)
+	enabled := mode == "per_session" && strings.TrimSpace(base) != ""
+	e.perSessionWorkDir = enabled
+	if enabled && e.workspacePool == nil {
+		e.workspacePool = newWorkspacePool(DefaultWorkspaceIdleTimeout)
+		go e.runIdleReaper()
+	}
+}
+
 // SetWorkspaceIdleTimeout overrides the workspace idle reaper timeout.
 // Must be called after SetMultiWorkspace. A zero value disables reaping.
 func (e *Engine) SetWorkspaceIdleTimeout(d time.Duration) {
@@ -628,7 +641,6 @@ func (e *Engine) SetWebStatusFunc(fn func() string)                    { e.webSt
 func (e *Engine) SetSkipGit(skipGit bool) {
 	e.skipGit = skipGit
 }
-
 
 // SetInjectSender controls whether sender identity (platform and user ID) is
 // prepended to each message before forwarding it to the agent. When enabled,
@@ -2046,6 +2058,8 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		sessions = wsSessions
 		agent = wsAgent
 		interactiveKey = resolvedWorkspace + ":" + msg.SessionKey
+	} else if wd := e.activeSessionWorkDir(msg.SessionKey, false); wd != "" {
+		interactiveKey = normalizeWorkspacePath(wd) + ":" + msg.SessionKey
 	}
 
 	if len(msg.Images) == 0 && strings.HasPrefix(content, "/") {
@@ -2126,6 +2140,19 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 sessionLocked:
 	if rotated := e.maybeAutoResetSessionOnIdle(p, msg, sessions, interactiveKey, session); rotated != nil {
 		session = rotated
+	}
+
+	if !e.multiWorkspace && session.WorkDir != "" {
+		dir := normalizeWorkspacePath(session.WorkDir)
+		wsAgent, _, err := e.getOrCreateWorkspaceAgent(dir)
+		if err != nil {
+			session.Unlock()
+			e.reply(p, msg.ReplyCtx, fmt.Sprintf("Failed to initialize workspace: %v", err))
+			return
+		}
+		agent = wsAgent
+		resolvedWorkspace = dir
+		interactiveKey = dir + ":" + msg.SessionKey
 	}
 
 	// Ensure an interactiveState entry exists before launching the async
@@ -5433,6 +5460,11 @@ func (e *Engine) matchSession(sessions []AgentSessionInfo, manager *SessionManag
 }
 
 func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
+	if msg != nil {
+		if wd := e.activeSessionWorkDir(msg.SessionKey, true); wd != "" {
+			return normalizeWorkspacePath(wd)
+		}
+	}
 	if switcher, ok := agent.(WorkDirSwitcher); ok {
 		if wd := strings.TrimSpace(switcher.GetWorkDir()); wd != "" {
 			return normalizeWorkspacePath(wd)
@@ -5458,6 +5490,26 @@ func (e *Engine) commandWorkDir(agent Agent, msg *Message) string {
 		return normalizeWorkspacePath(cwd)
 	}
 	return ""
+}
+
+func (e *Engine) activeSessionWorkDir(sessionKey string, create bool) string {
+	if e == nil || e.sessions == nil || sessionKey == "" {
+		return ""
+	}
+	if create && e.perSessionWorkDir {
+		return strings.TrimSpace(e.sessions.GetOrCreateActive(sessionKey).WorkDir)
+	}
+	e.sessions.mu.RLock()
+	defer e.sessions.mu.RUnlock()
+	sid := e.sessions.activeSession[sessionKey]
+	if sid == "" {
+		return ""
+	}
+	session := e.sessions.sessions[sid]
+	if session == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.WorkDir)
 }
 
 func (e *Engine) buildReplyFooter(agent Agent, session AgentSession, workspaceDir string, contextLeft string) string {
@@ -6942,13 +6994,16 @@ func (e *Engine) renderStatusCard(sessionKey string, userID string) *Card {
 		platformStr = "-"
 	}
 
-	workDirStr := ""
-	if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
-		workDirStr = strings.TrimSpace(wd.GetWorkDir())
+	workDirStr := e.activeSessionWorkDir(sessionKey, true)
+	if workDirStr == "" {
+		if wd, ok := agent.(interface{ GetWorkDir() string }); ok {
+			workDirStr = strings.TrimSpace(wd.GetWorkDir())
+		}
 	}
 	if workDirStr == "" {
 		workDirStr, _ = os.Getwd()
 	}
+	workDirStr = normalizeWorkspacePath(workDirStr)
 
 	uptimeStr := formatDurationI18n(time.Since(e.startedAt), e.i18n.CurrentLang())
 
@@ -10497,7 +10552,11 @@ func (e *Engine) renderDirCard(sessionKey string, page int) (*Card, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s", e.i18n.T(MsgDirNotSupported))
 	}
-	currentDir := switcher.GetWorkDir()
+	currentDir := e.activeSessionWorkDir(sessionKey, true)
+	if currentDir == "" {
+		currentDir = switcher.GetWorkDir()
+	}
+	currentDir = normalizeWorkspacePath(currentDir)
 	var history []string
 	if e.dirHistory != nil {
 		history = e.dirHistory.List(e.name)
@@ -11639,17 +11698,13 @@ func (e *Engine) executeCustomCommand(p Platform, msg *Message, cmd *CustomComma
 	// Otherwise, use prompt template
 	prompt := ExpandPrompt(cmd.Prompt, args)
 
-	// Resolve workspace-aware agent in multi-workspace mode. Without this the
-	// custom command always runs against the global e.agent (with the
-	// project-level work_dir), bypassing any per-channel binding written by
-	// /workspace bind.
-	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	agent, sessions, interactiveKey, workspaceDir, err := e.promptCommandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -11680,12 +11735,7 @@ func (e *Engine) executeShellCommand(p Platform, msg *Message, cmd *CustomComman
 	// Determine working directory
 	workDir := cmd.WorkDir
 	if workDir == "" {
-		// Default to agent's work_dir if available
-		if e.agent != nil {
-			if agentOpts, ok := e.agent.(interface{ GetWorkDir() string }); ok {
-				workDir = agentOpts.GetWorkDir()
-			}
-		}
+		workDir = e.commandWorkDir(e.agent, msg)
 	}
 	if workDir == "" {
 		workDir, _ = os.Getwd()
@@ -11868,16 +11918,13 @@ func (e *Engine) executeSkill(p Platform, msg *Message, skill *Skill, args []str
 		return
 	}
 
-	// Resolve workspace-aware agent in multi-workspace mode. Without this the
-	// skill always runs against the global e.agent (with the project-level
-	// work_dir), bypassing any per-channel binding written by /workspace bind.
-	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	agent, sessions, interactiveKey, workspaceDir, err := e.promptCommandContext(p, msg)
 	if err != nil {
 		e.reply(p, msg.ReplyCtx, e.i18n.Tf(MsgWsResolutionError, err))
 		return
 	}
 
-	session := sessions.GetOrCreateActive(interactiveKey)
+	session := sessions.GetOrCreateActive(msg.SessionKey)
 	if !session.TryLock() {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPreviousProcessing))
 		return
@@ -13290,7 +13337,13 @@ func (e *Engine) commandContext(p Platform, msg *Message) (Agent, *SessionManage
 // processInteractiveMessageWith (idle reaper bookkeeping, reply footer, etc).
 func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
 	if !e.multiWorkspace {
-		return e.agent, e.sessions, msg.SessionKey, "", nil
+		interactiveKey := msg.SessionKey
+		workspaceDir := ""
+		if wd := e.activeSessionWorkDir(msg.SessionKey, true); wd != "" {
+			workspaceDir = normalizeWorkspacePath(wd)
+			interactiveKey = workspaceDir + ":" + msg.SessionKey
+		}
+		return e.agent, e.sessions, interactiveKey, workspaceDir, nil
 	}
 	channelID := effectiveChannelID(msg)
 	channelKey := effectiveWorkspaceChannelKey(msg)
@@ -13311,9 +13364,32 @@ func (e *Engine) commandContextWithWorkspace(p Platform, msg *Message) (Agent, *
 	return agent, sessions, interactiveKey, effectiveDir, nil
 }
 
+func (e *Engine) promptCommandContext(p Platform, msg *Message) (Agent, *SessionManager, string, string, error) {
+	agent, sessions, interactiveKey, workspaceDir, err := e.commandContextWithWorkspace(p, msg)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	if !e.perSessionWorkDir || e.multiWorkspace {
+		return agent, sessions, interactiveKey, workspaceDir, nil
+	}
+	session := e.sessions.GetOrCreateActive(msg.SessionKey)
+	if session.WorkDir == "" {
+		return agent, sessions, interactiveKey, workspaceDir, nil
+	}
+	dir := normalizeWorkspacePath(session.WorkDir)
+	wsAgent, _, err := e.getOrCreateWorkspaceAgent(dir)
+	if err != nil {
+		return nil, nil, "", "", err
+	}
+	return wsAgent, e.sessions, dir + ":" + msg.SessionKey, dir, nil
+}
+
 // sessionContextForKey resolves the agent and session manager for a sessionKey.
 // It uses existing workspace bindings and falls back to global context if unresolved.
 func (e *Engine) sessionContextForKey(sessionKey string) (Agent, *SessionManager) {
+	if e.perSessionWorkDir {
+		return e.agent, e.sessions
+	}
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return e.agent, e.sessions
 	}
@@ -13362,6 +13438,15 @@ func (e *Engine) workspaceFromLiveState(sessionKey string) string {
 // In multi-workspace mode, it prefixes with the bound workspace path when available.
 func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 	// Single-workspace fast path: no scan, no binding lookup, no lock.
+	if e.perSessionWorkDir {
+		if wd := e.activeSessionWorkDir(sessionKey, false); wd != "" {
+			return normalizeWorkspacePath(wd) + ":" + sessionKey
+		}
+		if found := e.findInteractiveKeyForSession(sessionKey); found != "" {
+			return found
+		}
+		return sessionKey
+	}
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return sessionKey
 	}
@@ -13394,6 +13479,15 @@ func (e *Engine) interactiveKeyForSessionKey(sessionKey string) string {
 //     ID, so step 2 misses. The state map was keyed correctly at processing
 //     time, so we recover the workspace prefix from there.
 func (e *Engine) interactiveKeyForSessionKeyLocked(sessionKey string) string {
+	if e.perSessionWorkDir {
+		if wd := e.activeSessionWorkDir(sessionKey, false); wd != "" {
+			return normalizeWorkspacePath(wd) + ":" + sessionKey
+		}
+		if found := findInteractiveKeyInStatesLocked(e.interactiveStates, sessionKey); found != "" {
+			return found
+		}
+		return sessionKey
+	}
 	if !e.multiWorkspace || e.workspaceBindings == nil {
 		return sessionKey
 	}

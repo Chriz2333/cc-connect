@@ -282,6 +282,23 @@ func main() {
 		engine.SetAttachmentSendEnabled(cfg.AttachmentSend != "off")
 		engine.SetFilterExternalSessions(proj.FilterExternalSessions != nil && *proj.FilterExternalSessions)
 		engine.SetBaseWorkDir(workDir)
+		if proj.WorkDirMode == "per_session" {
+			base := strings.TrimSpace(proj.WorkDirBase)
+			if strings.HasPrefix(base, "~/") || strings.HasPrefix(base, `~\`) {
+				home, _ := os.UserHomeDir()
+				base = filepath.Join(home, base[2:])
+			}
+			if base != "" && !filepath.IsAbs(base) {
+				if abs, err := filepath.Abs(base); err == nil {
+					base = abs
+				}
+			}
+			if err := os.MkdirAll(base, 0o755); err != nil {
+				slog.Error("failed to create per-session work_dir_base", "path", base, "err", err)
+				continue
+			}
+			engine.SetPerSessionWorkDir(proj.WorkDirMode, base)
+		}
 		engine.SetProjectStateStore(projectState)
 		engine.SetDataDir(cfg.DataDir)
 
