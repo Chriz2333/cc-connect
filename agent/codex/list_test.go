@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestListCodexSessionsWithOptions_IncludesChildWorkdirsWhenRecursive(t *testing.T) {
@@ -105,6 +106,40 @@ func TestListCodexSessionsWithOptions_HidesSubagentSessions(t *testing.T) {
 	}
 	if got[subagentThreadID] {
 		t.Fatalf("list included subagent thread session: got IDs %#v", got)
+	}
+}
+
+func TestListCodexSessionsWithOptions_DeduplicatesSessionID(t *testing.T) {
+	base := t.TempDir()
+	codexHome := filepath.Join(base, ".codex")
+	sessionDir := filepath.Join(codexHome, "sessions", "2026", "05", "24")
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
+		t.Fatalf("mkdir sessions: %v", err)
+	}
+
+	sessionID := "same-session"
+	oldPath := filepath.Join(sessionDir, "rollout-old.jsonl")
+	newPath := filepath.Join(sessionDir, "rollout-new.jsonl")
+	writeCodexListSession(t, oldPath, sessionID, base, "old delegated task fragment", `"source":"cli"`)
+	writeCodexListSession(t, newPath, sessionID, base, "new user-visible session", `"source":"cli"`)
+	oldTime := time.Date(2026, 5, 24, 13, 30, 0, 0, time.Local)
+	newTime := time.Date(2026, 5, 24, 18, 53, 0, 0, time.Local)
+	if err := os.Chtimes(oldPath, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes old: %v", err)
+	}
+	if err := os.Chtimes(newPath, newTime, newTime); err != nil {
+		t.Fatalf("chtimes new: %v", err)
+	}
+
+	sessions, err := listCodexSessionsWithOptions(base, codexHome, true)
+	if err != nil {
+		t.Fatalf("listCodexSessionsWithOptions: %v", err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions len = %d, want 1: %#v", len(sessions), sessions)
+	}
+	if sessions[0].Summary != "new user-visible session" {
+		t.Fatalf("summary = %q, want newest transcript summary", sessions[0].Summary)
 	}
 }
 

@@ -67,12 +67,34 @@ func listCodexSessionsWithOptions(workDir, codexHome string, includeChildWorkDir
 			sessions = append(sessions, *info)
 		}
 	}
+	sessions = dedupeCodexSessions(sessions)
 
 	sort.Slice(sessions, func(i, j int) bool {
 		return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt)
 	})
 
 	return sessions, nil
+}
+
+func dedupeCodexSessions(sessions []core.AgentSessionInfo) []core.AgentSessionInfo {
+	if len(sessions) < 2 {
+		return sessions
+	}
+	byID := make(map[string]core.AgentSessionInfo, len(sessions))
+	for _, s := range sessions {
+		if s.ID == "" {
+			continue
+		}
+		prev, ok := byID[s.ID]
+		if !ok || s.ModifiedAt.After(prev.ModifiedAt) {
+			byID[s.ID] = s
+		}
+	}
+	out := make([]core.AgentSessionInfo, 0, len(byID))
+	for _, s := range byID {
+		out = append(out, s)
+	}
+	return out
 }
 
 // parseCodexSessionFile reads a Codex JSONL transcript.
