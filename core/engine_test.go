@@ -2515,6 +2515,41 @@ func TestCmdList_MultiWorkspaceUsesWorkspaceSessions(t *testing.T) {
 	}
 }
 
+func TestCmdList_PerSessionWorkDirUsesGlobalAgentSessions(t *testing.T) {
+	p := &stubCardPlatform{stubPlatformEngine: stubPlatformEngine{n: "card"}}
+	globalAgent := &stubListAgent{
+		sessions: []AgentSessionInfo{
+			{ID: "old-session", Summary: "Old visible session", MessageCount: 3},
+		},
+	}
+	e := NewEngine("test", globalAgent, []Platform{p}, "", LangEnglish)
+	defer e.Stop()
+	base := t.TempDir()
+	e.SetPerSessionWorkDir("per_session", base)
+
+	msg := &Message{SessionKey: "plain:user1", ReplyCtx: "ctx"}
+	session := e.sessions.NewSession(msg.SessionKey, "")
+	ws := e.workspacePool.GetOrCreate(normalizeWorkspacePath(session.WorkDir))
+	ws.agent = &stubListAgent{}
+	ws.sessions = NewSessionManager("")
+
+	e.cmdList(p, msg, nil)
+
+	p.mu.Lock()
+	cards := append([]*Card(nil), p.repliedCards...)
+	p.mu.Unlock()
+	if len(cards) == 0 {
+		t.Fatal("expected /list to send a card")
+	}
+	rendered := cards[0].RenderText()
+	if strings.Contains(rendered, "No sessions found") || strings.Contains(rendered, "未找到") {
+		t.Fatalf("expected global sessions, got empty response: %q", rendered)
+	}
+	if !strings.Contains(rendered, "Old visible session") {
+		t.Fatalf("expected /list to include global agent session, got %q", rendered)
+	}
+}
+
 func TestHandlePendingPermission_MultiWorkspaceLookup(t *testing.T) {
 	e := newTestEngine()
 

@@ -5285,6 +5285,7 @@ func (e *Engine) cmdList(p Platform, msg *Message, args []string) {
 			return
 		}
 		agentSessions = e.applySessionFilter(agentSessions, sessions)
+		agentSessions = e.fallbackLocalSessionList(agentSessions, sessions, msg.SessionKey)
 		if len(agentSessions) == 0 {
 			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgListEmpty))
 			return
@@ -10461,6 +10462,7 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 		return nil, fmt.Errorf(e.i18n.T(MsgListError), err)
 	}
 	agentSessions = e.applySessionFilter(agentSessions, sessions)
+	agentSessions = e.fallbackLocalSessionList(agentSessions, sessions, sessionKey)
 	if len(agentSessions) == 0 {
 		return e.simpleCard(e.i18n.Tf(MsgCardTitleSessions, agent.Name(), 0), "turquoise", e.i18n.T(MsgListEmpty)), nil
 	}
@@ -10535,6 +10537,46 @@ func (e *Engine) renderListCard(sessionKey string, page int) (*Card, error) {
 	}
 
 	return cb.Build(), nil
+}
+
+func (e *Engine) fallbackLocalSessionList(agentSessions []AgentSessionInfo, sessions *SessionManager, sessionKey string) []AgentSessionInfo {
+	if len(agentSessions) > 0 || sessions == nil {
+		return agentSessions
+	}
+	local := sessions.ListSessions(sessionKey)
+	if len(local) == 0 {
+		return agentSessions
+	}
+	out := make([]AgentSessionInfo, 0, len(local))
+	for _, s := range local {
+		if s == nil {
+			continue
+		}
+		s.mu.Lock()
+		id := s.AgentSessionID
+		if id == "" {
+			id = s.ID
+		}
+		summary := strings.TrimSpace(s.Name)
+		if summary == "" && len(s.History) > 0 {
+			summary = strings.TrimSpace(s.History[0].Content)
+		}
+		if summary == "" {
+			summary = s.ID
+		}
+		info := AgentSessionInfo{
+			ID:           id,
+			Summary:      summary,
+			MessageCount: len(s.History),
+			ModifiedAt:   s.UpdatedAt,
+		}
+		s.mu.Unlock()
+		out = append(out, info)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ModifiedAt.After(out[j].ModifiedAt)
+	})
+	return out
 }
 
 // dirCardTruncPath shortens absolute paths for card list rows.
