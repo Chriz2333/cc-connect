@@ -189,6 +189,86 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
+func TestValidateProject_PerSessionWorkDirRequiresBase(t *testing.T) {
+	cfg := Config{
+		Projects: []ProjectConfig{{
+			Name:        "codex",
+			WorkDirMode: "per_session",
+			Agent:       AgentConfig{Type: "codex", Options: map[string]any{}},
+			Platforms:   []PlatformConfig{{Type: "dingtalk", Options: map[string]any{}}},
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `project "codex": work_dir_mode "per_session" requires work_dir_base`) {
+		t.Fatalf("Validate() error = %v, want missing work_dir_base error", err)
+	}
+}
+
+func TestValidateProject_PerSessionWorkDirRejectsMultiWorkspace(t *testing.T) {
+	cfg := Config{
+		Projects: []ProjectConfig{{
+			Name:        "codex",
+			Mode:        "multi-workspace",
+			BaseDir:     "/tmp/workspaces",
+			WorkDirMode: "per_session",
+			WorkDirBase: "/tmp/codex",
+			Agent:       AgentConfig{Type: "codex", Options: map[string]any{}},
+			Platforms:   []PlatformConfig{{Type: "dingtalk", Options: map[string]any{}}},
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `project "codex": work_dir_mode "per_session" cannot be used with multi-workspace mode`) {
+		t.Fatalf("Validate() error = %v, want mode conflict error", err)
+	}
+}
+
+func TestValidateProject_PerSessionWorkDirAcceptsValidConfig(t *testing.T) {
+	cfg := Config{
+		Projects: []ProjectConfig{{
+			Name:        "codex",
+			WorkDirMode: "per_session",
+			WorkDirBase: "/tmp/codex",
+			Agent:       AgentConfig{Type: "codex", Options: map[string]any{}},
+			Platforms:   []PlatformConfig{{Type: "dingtalk", Options: map[string]any{}}},
+		}},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+}
+
+func TestValidateProject_RejectsUnknownWorkDirMode(t *testing.T) {
+	cfg := Config{
+		Projects: []ProjectConfig{{
+			Name:        "codex",
+			WorkDirMode: "daily",
+			WorkDirBase: "/tmp/codex",
+			Agent:       AgentConfig{Type: "codex", Options: map[string]any{}},
+			Platforms:   []PlatformConfig{{Type: "dingtalk", Options: map[string]any{}}},
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `project "codex": unsupported work_dir_mode "daily"`) {
+		t.Fatalf("Validate() error = %v, want unsupported mode error", err)
+	}
+}
+
+func TestValidateProject_RejectsWorkDirModeWithWhitespace(t *testing.T) {
+	cfg := Config{
+		Projects: []ProjectConfig{{
+			Name:        "codex",
+			WorkDirMode: " per_session ",
+			WorkDirBase: "/tmp/codex",
+			Agent:       AgentConfig{Type: "codex", Options: map[string]any{}},
+			Platforms:   []PlatformConfig{{Type: "dingtalk", Options: map[string]any{}}},
+		}},
+	}
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), `project "codex": unsupported work_dir_mode " per_session "`) {
+		t.Fatalf("Validate() error = %v, want unsupported mode error", err)
+	}
+}
+
 func TestRunAsEnv_RejectsDangerousVars(t *testing.T) {
 	dangerous := []string{"PATH", "path", "LD_PRELOAD", "HOME", "USER", "SHELL", "SUDO_USER", "SUDO_COMMAND", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"}
 	for _, v := range dangerous {

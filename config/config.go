@@ -175,14 +175,14 @@ const (
 
 // DisplayConfig controls how intermediate messages (thinking, tool output) are shown.
 type DisplayConfig struct {
-	Mode               *string `toml:"mode"`                 // "full" (default), "compact", or "quiet"
-	CardMode           *string `toml:"card_mode"`            // "legacy" (default) or "rich" (Card 2.0 Feishu)
-	ThinkingMessages   *bool   `toml:"thinking_messages"`    // whether thinking messages are shown; default true
-	ThinkingMaxLen     *int    `toml:"thinking_max_len"`     // max chars for thinking messages; 0 = no truncation; default 300
-	ToolMaxLen         *int    `toml:"tool_max_len"`         // max chars for tool use messages; 0 = no truncation; default 500
-	ToolMessages       *bool   `toml:"tool_messages"`        // whether tool progress messages are shown; default true
-	ShowContextIndicator *bool `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
-	ReplyFooter        *bool   `toml:"reply_footer"`         // whether Codex-like footer is shown; default true
+	Mode                 *string `toml:"mode"`                   // "full" (default), "compact", or "quiet"
+	CardMode             *string `toml:"card_mode"`              // "legacy" (default) or "rich" (Card 2.0 Feishu)
+	ThinkingMessages     *bool   `toml:"thinking_messages"`      // whether thinking messages are shown; default true
+	ThinkingMaxLen       *int    `toml:"thinking_max_len"`       // max chars for thinking messages; 0 = no truncation; default 300
+	ToolMaxLen           *int    `toml:"tool_max_len"`           // max chars for tool use messages; 0 = no truncation; default 500
+	ToolMessages         *bool   `toml:"tool_messages"`          // whether tool progress messages are shown; default true
+	ShowContextIndicator *bool   `toml:"show_context_indicator"` // whether [ctx: ~N%] suffix is shown; default true
+	ReplyFooter          *bool   `toml:"reply_footer"`           // whether Codex-like footer is shown; default true
 }
 
 // StreamPreviewConfig controls real-time streaming preview in IM.
@@ -329,10 +329,12 @@ type ReferenceConfig struct {
 
 // ProjectConfig binds one agent (with a specific work_dir) to one or more platforms.
 type ProjectConfig struct {
-	Name    string `toml:"name"`
-	Mode    string `toml:"mode,omitempty"`     // "" or "multi-workspace"
-	BaseDir string `toml:"base_dir,omitempty"` // parent dir for workspaces
-	SkipGit *bool  `toml:"skip_git,omitempty"`
+	Name        string `toml:"name"`
+	Mode        string `toml:"mode,omitempty"`          // "" or "multi-workspace"
+	BaseDir     string `toml:"base_dir,omitempty"`      // parent dir for workspaces
+	WorkDirMode string `toml:"work_dir_mode,omitempty"` // "" or "per_session"
+	WorkDirBase string `toml:"work_dir_base,omitempty"` // parent dir for per-session work dirs
+	SkipGit     *bool  `toml:"skip_git,omitempty"`
 	// WorkspaceInitAllowLocalPaths allows /workspace init and the conversational
 	// init flow to bind existing local directories. Default false keeps init
 	// limited to git URLs; use /workspace bind or /workspace route for explicit
@@ -770,6 +772,10 @@ func EffectiveCardMode(cfg *Config, proj *ProjectConfig) string {
 	return "legacy"
 }
 
+func (c *Config) Validate() error {
+	return c.validate()
+}
+
 func (c *Config) validate() error {
 	if err := validateDisplayConfig("display", &c.Display); err != nil {
 		return err
@@ -808,6 +814,18 @@ func (c *Config) validate() error {
 			if _, ok := proj.Agent.Options["work_dir"]; ok {
 				return fmt.Errorf("project %q: multi-workspace mode conflicts with agent work_dir (use base_dir instead)", proj.Name)
 			}
+		}
+		switch proj.WorkDirMode {
+		case "":
+		case "per_session":
+			if proj.Mode == "multi-workspace" {
+				return fmt.Errorf("project %q: work_dir_mode \"per_session\" cannot be used with multi-workspace mode", proj.Name)
+			}
+			if strings.TrimSpace(proj.WorkDirBase) == "" {
+				return fmt.Errorf("project %q: work_dir_mode \"per_session\" requires work_dir_base", proj.Name)
+			}
+		default:
+			return fmt.Errorf("project %q: unsupported work_dir_mode %q", proj.Name, proj.WorkDirMode)
 		}
 		if proj.ResetOnIdleMins != nil && *proj.ResetOnIdleMins < 0 {
 			return fmt.Errorf("config: %s.reset_on_idle_mins must be >= 0", prefix)
