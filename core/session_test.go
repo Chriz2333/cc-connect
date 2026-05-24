@@ -3,6 +3,7 @@ package core
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -56,6 +57,53 @@ func TestSessionManager_NewSideSession(t *testing.T) {
 	list := sm.ListSessions("user1")
 	if len(list) != 2 {
 		t.Fatalf("want 2 sessions for user1, got %d", len(list))
+	}
+}
+
+func TestSessionManager_PerSessionWorkDirAllocation(t *testing.T) {
+	base := t.TempDir()
+	sm := NewSessionManager("")
+	sm.ConfigurePerSessionWorkDir("per_session", base)
+
+	s1 := sm.NewSession("dingtalk:group", "first")
+	s2 := sm.NewSession("dingtalk:group", "second")
+
+	if s1.WorkDir == "" || s2.WorkDir == "" {
+		t.Fatalf("WorkDir should be assigned, got %q and %q", s1.WorkDir, s2.WorkDir)
+	}
+	if s1.WorkDir == s2.WorkDir {
+		t.Fatalf("WorkDir should be unique per session, got %q", s1.WorkDir)
+	}
+	if !strings.HasPrefix(filepath.Clean(s1.WorkDir), filepath.Clean(base)+string(os.PathSeparator)) {
+		t.Fatalf("WorkDir %q should be under base %q", s1.WorkDir, base)
+	}
+	if _, err := os.Stat(s1.WorkDir); err != nil {
+		t.Fatalf("allocated WorkDir should exist: %v", err)
+	}
+}
+
+func TestSessionManager_PerSessionWorkDirPersistence(t *testing.T) {
+	root := t.TempDir()
+	store := filepath.Join(root, "sessions.json")
+	base := filepath.Join(root, "codex")
+
+	sm := NewSessionManager(store)
+	sm.ConfigurePerSessionWorkDir("per_session", base)
+	s := sm.NewSession("dingtalk:group", "persisted")
+	want := s.WorkDir
+
+	sm2 := NewSessionManager(store)
+	got := sm2.GetOrCreateActive("dingtalk:group")
+	if got.WorkDir != want {
+		t.Fatalf("reloaded WorkDir = %q, want %q", got.WorkDir, want)
+	}
+}
+
+func TestSessionManager_PerSessionWorkDirDisabledByDefault(t *testing.T) {
+	sm := NewSessionManager("")
+	s := sm.NewSession("dingtalk:group", "default")
+	if s.WorkDir != "" {
+		t.Fatalf("WorkDir = %q, want empty when per-session mode is disabled", s.WorkDir)
 	}
 }
 

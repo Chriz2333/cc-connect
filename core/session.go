@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -20,6 +21,7 @@ type Session struct {
 	Name                string         `json:"name"`
 	AgentSessionID      string         `json:"agent_session_id"`
 	AgentType           string         `json:"agent_type,omitempty"`
+	WorkDir             string         `json:"work_dir,omitempty"`
 	PastAgentSessionIDs []string       `json:"past_agent_session_ids,omitempty"`
 	History             []HistoryEntry `json:"history"`
 	CreatedAt           time.Time      `json:"created_at"`
@@ -238,6 +240,9 @@ type SessionManager struct {
 	userMeta      map[string]*UserMeta // sessionKey → display info
 	counter       int64
 	storePath     string // empty = no persistence
+	workDirBase   string
+
+	perSessionWorkDir bool
 
 	// legacyData is true when sessions were loaded from a snapshot that
 	// predates PastAgentSessionIDs tracking. In this state, many sessions
@@ -264,6 +269,13 @@ func NewSessionManager(storePath string) *SessionManager {
 // StorePath returns the file path used for session persistence.
 func (sm *SessionManager) StorePath() string {
 	return sm.storePath
+}
+
+func (sm *SessionManager) ConfigurePerSessionWorkDir(mode, base string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.workDirBase = strings.TrimSpace(base)
+	sm.perSessionWorkDir = mode == "per_session" && sm.workDirBase != ""
 }
 
 func (sm *SessionManager) nextID() string {
@@ -304,6 +316,7 @@ func (sm *SessionManager) NewSideSession(userKey, name string) *Session {
 	s := &Session{
 		ID:        id,
 		Name:      name,
+		WorkDir:   sm.allocateWorkDirLocked(id, name, now),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -319,6 +332,7 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 	s := &Session{
 		ID:        id,
 		Name:      name,
+		WorkDir:   sm.allocateWorkDirLocked(id, name, now),
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -326,6 +340,60 @@ func (sm *SessionManager) createLocked(userKey, name string) *Session {
 	sm.activeSession[userKey] = id
 	sm.userSessions[userKey] = append(sm.userSessions[userKey], id)
 	return s
+}
+
+func (sm *SessionManager) allocateWorkDirLocked(id, name string, now time.Time) string {
+	if !sm.perSessionWorkDir {
+		return ""
+	}
+
+	dateDir := filepath.Join(sm.workDirBase, now.Format("2006-01-02"))
+	if err := os.MkdirAll(dateDir, 0o755); err != nil {
+		slog.Error("session: failed to create work dir date dir", "path", dateDir, "error", err)
+		return ""
+	}
+
+	label := sanitizeWorkDirLabel(name)
+	if label == "" {
+		label = id
+	}
+	stem := label + "-" + id
+	for i := 0; i < 100; i++ {
+		dirName := stem
+		if i > 0 {
+			dirName = fmt.Sprintf("%s-%d", stem, i)
+		}
+		dir := filepath.Join(dateDir, dirName)
+		if err := os.Mkdir(dir, 0o755); err == nil {
+			return dir
+		} else if !os.IsExist(err) {
+			slog.Error("session: failed to create work dir", "path", dir, "error", err)
+			return ""
+		}
+	}
+
+	slog.Error("session: failed to allocate unique work dir", "base", dateDir, "session", id, "name", name)
+	return ""
+}
+
+func sanitizeWorkDirLabel(name string) string {
+	var b strings.Builder
+	for i := 0; i < len(name) && b.Len() < 48; i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z':
+			b.WriteByte(c)
+		case c >= 'A' && c <= 'Z':
+			b.WriteByte(c)
+		case c >= '0' && c <= '9':
+			b.WriteByte(c)
+		case c == '-' || c == '_':
+			b.WriteByte(c)
+		case c == ' ':
+			b.WriteByte('-')
+		}
+	}
+	return b.String()
 }
 
 func (sm *SessionManager) SwitchSession(userKey, target string) (*Session, error) {
@@ -591,6 +659,7 @@ func (sm *SessionManager) saveLocked() {
 			Name:                s.Name,
 			AgentSessionID:      agentSID,
 			AgentType:           s.AgentType,
+			WorkDir:             s.WorkDir,
 			PastAgentSessionIDs: append([]string(nil), s.PastAgentSessionIDs...),
 			History:             append([]HistoryEntry(nil), s.History...),
 			CreatedAt:           s.CreatedAt,
