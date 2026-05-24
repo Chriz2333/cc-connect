@@ -1334,6 +1334,10 @@ app_secret = "your-feishu-app-secret"
 
 # [[projects]]
 # name = "my-codex-project"
+# Optional: create an independent working directory for each cc-connect session.
+# 可选：为每个 cc-connect 会话创建独立工作目录。
+# work_dir_mode = "per_session"
+# work_dir_base = "~/Documents/Codex"
 #
 # [projects.agent]
 # type = "codex"
@@ -1341,6 +1345,11 @@ app_secret = "your-feishu-app-secret"
 # [projects.agent.options]
 # work_dir = "/path/to/project"
 # mode = "suggest"  # "suggest" | "auto-edit" | "full-auto" | "yolo"
+#
+# When project-level work_dir_mode = "per_session", do not set a fixed work_dir
+# in [projects.agent.options]; cc-connect assigns the session work_dir automatically.
+# 当项目级 work_dir_mode = "per_session" 时，不要在 [projects.agent.options]
+# 写固定 work_dir；cc-connect 会自动分配每个会话的工作目录。
 #
 # Mode options / 模式说明:
 # - "suggest":   ask permission for every tool call (default, safest) / 每次调用都需确认（默认，最安全）

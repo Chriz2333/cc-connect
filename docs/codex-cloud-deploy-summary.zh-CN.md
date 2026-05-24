@@ -161,6 +161,34 @@ share_session_in_channel = true
 - `share_session_in_channel = true` 表示同一个钉钉群共享一个 Agent 会话上下文。
 - `attachment_send = "on"` 必须开启，否则 `send --file` 会被 cc-connect 全局拦截。
 
+### 每会话独立目录
+
+如果希望每个 cc-connect 会话都有独立的 Codex 工作目录，在项目级配置中启用：
+
+```toml
+[[projects]]
+name = "codex-dingtalk"
+work_dir_mode = "per_session"
+work_dir_base = "/home/codex/Documents/Codex"
+
+[projects.agent]
+type = "codex"
+
+[projects.agent.options]
+mode = "suggest"
+reasoning_effort = "medium"
+```
+
+Windows 本机示例：
+
+```toml
+work_dir_base = "C:\\Users\\Administrator\\Documents\\Codex"
+```
+
+启用后，cc-connect 会在 `work_dir_base/YYYY-MM-DD/` 下创建 `cc-connect-...` 目录，并把分配结果持久化到 session store。服务重启后，旧会话会回到原目录继续使用。
+
+不要同时在 `[projects.agent.options]` 写固定 `work_dir`；当 `work_dir_mode = "per_session"` 时，cc-connect 会自动分配每个会话的工作目录。
+
 ## 安装 Codex CLI
 
 服务器上需要安装并登录/配置 Codex CLI。具体命令依赖当时 OpenAI/Codex 的官方安装方式；部署时应以官方文档为准。
