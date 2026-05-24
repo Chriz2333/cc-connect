@@ -287,6 +287,8 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	sm.migrateDingTalkDirectShortKeyLocked(userKey)
+
 	if sid, ok := sm.activeSession[userKey]; ok {
 		if s, ok := sm.sessions[sid]; ok {
 			return s
@@ -295,6 +297,54 @@ func (sm *SessionManager) GetOrCreateActive(userKey string) *Session {
 	s := sm.createLocked(userKey, "default")
 	sm.saveLocked()
 	return s
+}
+
+func (sm *SessionManager) migrateDingTalkDirectShortKeyLocked(userKey string) {
+	const prefix = "dingtalk:d:"
+	if !strings.HasPrefix(userKey, prefix) {
+		return
+	}
+	rest := strings.TrimPrefix(userKey, prefix)
+	parts := strings.SplitN(rest, ":", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		return
+	}
+	oldKey := prefix + parts[0]
+	oldIDs := sm.userSessions[oldKey]
+	if len(oldIDs) == 0 {
+		return
+	}
+
+	merged := make([]string, 0, len(oldIDs)+len(sm.userSessions[userKey]))
+	seen := make(map[string]struct{}, len(oldIDs)+len(sm.userSessions[userKey]))
+	for _, sid := range append(append([]string{}, oldIDs...), sm.userSessions[userKey]...) {
+		if _, ok := seen[sid]; ok {
+			continue
+		}
+		if _, ok := sm.sessions[sid]; !ok {
+			continue
+		}
+		seen[sid] = struct{}{}
+		merged = append(merged, sid)
+	}
+	if len(merged) == 0 {
+		return
+	}
+
+	sm.userSessions[userKey] = merged
+	sm.userSessions[oldKey] = merged
+	if active := sm.activeSession[userKey]; active != "" {
+		sm.activeSession[oldKey] = active
+	} else if active := sm.activeSession[oldKey]; active != "" {
+		sm.activeSession[userKey] = active
+	}
+	if meta := sm.userMeta[oldKey]; meta != nil {
+		if _, ok := sm.userMeta[userKey]; !ok {
+			cp := *meta
+			sm.userMeta[userKey] = &cp
+		}
+	}
+	sm.saveLocked()
 }
 
 func (sm *SessionManager) NewSession(userKey, name string) *Session {

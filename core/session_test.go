@@ -169,6 +169,36 @@ func TestSessionManager_ListSessions(t *testing.T) {
 	}
 }
 
+func TestSessionManager_MigratesDingTalkDirectShortKeyToSenderKey(t *testing.T) {
+	sm := NewSessionManager("")
+	oldKey := "dingtalk:d:conv123"
+	newKey := "dingtalk:d:conv123:staff456"
+	oldA := sm.NewSession(oldKey, "old-a")
+	oldB := sm.NewSession(oldKey, "old-b")
+	newS := sm.NewSession(newKey, "new")
+
+	active := sm.GetOrCreateActive(newKey)
+	if active.ID != newS.ID {
+		t.Fatalf("active session = %q, want existing new key active %q", active.ID, newS.ID)
+	}
+
+	got := sm.ListSessions(newKey)
+	if len(got) != 3 {
+		t.Fatalf("new key sessions = %d, want 3", len(got))
+	}
+	wantIDs := []string{oldA.ID, oldB.ID, newS.ID}
+	for i, want := range wantIDs {
+		if got[i].ID != want {
+			t.Fatalf("new key session[%d] = %q, want %q", i, got[i].ID, want)
+		}
+	}
+
+	alias := sm.ListSessions(oldKey)
+	if len(alias) != 3 {
+		t.Fatalf("old key alias sessions = %d, want 3", len(alias))
+	}
+}
+
 func TestSessionManager_SessionNames(t *testing.T) {
 	sm := NewSessionManager("")
 	sm.SetSessionName("agent-123", "my-chat")
