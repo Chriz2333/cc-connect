@@ -16,6 +16,16 @@ This patch routes file messages by reply context:
 - Direct or per-user sessions use `POST /v1.0/robot/oToMessages/batchSend` with
   `userIds`.
 
+For DingTalk direct chats, proactive sends must preserve the sender staff ID.
+The fixed direct session key format is:
+
+```text
+dingtalk:d:<conversationId>:<senderStaffId>
+```
+
+Older short keys (`dingtalk:d:<conversationId>`) are migrated into the sender
+key so existing direct chats keep their history after upgrade.
+
 ## Build On A Linux Cloud Server
 
 Install Go 1.25 or newer:

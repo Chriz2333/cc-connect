@@ -20,6 +20,7 @@ fix/dingtalk-group-file-send
 
 ```text
 d306cbb fix: support DingTalk group file send
+08929e9 fix(codex): deduplicate listed transcript sessions
 ```
 
 不要直接使用 npm 官方包 `cc-connect v1.3.2` 部署这个需求。官方 v1.3.2 的 DingTalk 平台在 `cc-connect send --file` 时会返回：
@@ -43,6 +44,8 @@ Error: platform dingtalk: operation not supported by this platform
 
 - 群聊文件发送走 `POST /v1.0/robot/groupMessages/send`，使用 `openConversationId`。
 - 单聊或按用户隔离的会话继续走 `POST /v1.0/robot/oToMessages/batchSend`，使用 `userIds`。
+- DingTalk 私聊主动发送保留 `senderStaffId`，直接会话 session key 使用 `dingtalk:d:<conversationId>:<senderStaffId>`；旧短 key 会迁移合并到新 key。
+- Codex `work_dir_mode = "per_session"` 下，`/list` 会扫描 `work_dir_base` 及其子目录，并过滤 Codex subagent 会话与同一 session ID 的旧 transcript 分片。
 - 增加 DingTalk 单聊/群聊文件发送单元测试。
 - 增加 Windows 构建所需的 `daemon.CheckLinger` stub。
 
@@ -189,6 +192,8 @@ work_dir_base = "C:\\Users\\Administrator\\Documents\\Codex"
 
 不要同时在 `[projects.agent.options]` 写固定 `work_dir`；当 `work_dir_mode = "per_session"` 时，cc-connect 会自动分配每个会话的工作目录。
 
+`/list` 默认遵循 `filter_external_sessions = false` 的语义：显示 Codex 后端能找到的主动会话，包括同一 `work_dir_base` 下本机直接打开的 Codex 会话。实现上会排除 Codex subagent 内部会话，并对相同 session ID 的多个 transcript 文件去重，只保留最新记录；否则 Codex Desktop/CLI 产生的 subagent 或旧分片会把列表刷屏。
+
 ## 安装 Codex CLI
 
 服务器上需要安装并登录/配置 Codex CLI。具体命令依赖当时 OpenAI/Codex 的官方安装方式；部署时应以官方文档为准。
@@ -329,7 +334,18 @@ share_session_in_channel = true
 
 修改配置后需要重启 cc-connect。
 
-### 5. 云服务器上钉钉收不到消息
+### 5. `/list` 看不到本机直接打开的 Codex 会话
+
+确认项目级配置启用了 `work_dir_mode = "per_session"`，并设置了 `work_dir_base`。不要在 `[projects.agent.options]` 里再写固定 `work_dir`。本分支会用 `work_dir_base` 作为 Codex 会话枚举根目录；如果运行的是旧 binary，只会按固定 `work_dir` 精确匹配，子目录会话不会出现。
+
+如果 `/list` 出现大量看似 subagent 的条目，确认 binary 至少包含：
+
+```text
+2188e0a fix(codex): hide subagent sessions from list
+08929e9 fix(codex): deduplicate listed transcript sessions
+```
+
+### 6. 云服务器上钉钉收不到消息
 
 逐项检查：
 
