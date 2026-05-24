@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/chenhg5/cc-connect/core"
+	"github.com/open-dingtalk/dingtalk-stream-sdk-go/chatbot"
 )
 
 // ──────────────────────────────────────────────────────────────
@@ -203,6 +204,31 @@ func TestReconstructReplyCtx_DirectSession(t *testing.T) {
 	}
 	if !rc.proactive {
 		t.Error("proactive = false, want true")
+	}
+}
+
+func TestOnMessage_DirectSessionKeepsSenderStaffIDWhenChannelSharingEnabled(t *testing.T) {
+	p := &Platform{shareSessionInChannel: true}
+	var got *core.Message
+	p.handler = func(_ core.Platform, msg *core.Message) {
+		got = msg
+	}
+
+	p.onMessage(&chatbot.BotCallbackDataModel{
+		MsgId:            "msg-direct-shared-session",
+		Msgtype:          "text",
+		ConversationType: "1",
+		ConversationId:   "direct-conv-1",
+		SenderStaffId:    "staff-1",
+		SenderNick:       "Alice",
+		Text:             chatbot.BotCallbackDataTextModel{Content: "hello"},
+	}, nil)
+
+	if got == nil {
+		t.Fatal("handler was not called")
+	}
+	if got.SessionKey != "dingtalk:d:direct-conv-1:staff-1" {
+		t.Fatalf("SessionKey = %q, want direct key with senderStaffId", got.SessionKey)
 	}
 }
 

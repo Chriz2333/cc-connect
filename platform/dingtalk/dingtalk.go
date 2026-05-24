@@ -239,7 +239,7 @@ func (p *Platform) onMessage(data *chatbot.BotCallbackDataModel, richText *richT
 	}
 
 	var sessionKey string
-	if p.shareSessionInChannel {
+	if p.shareSessionInChannel && convType == "g" {
 		sessionKey = fmt.Sprintf("dingtalk:%s:%s", convType, data.ConversationId)
 	} else {
 		sessionKey = fmt.Sprintf("dingtalk:%s:%s:%s", convType, data.ConversationId, data.SenderStaffId)
